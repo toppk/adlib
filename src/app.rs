@@ -1112,33 +1112,25 @@ impl Adlib {
                     };
 
                     if ready {
-                        // Process in background
-                        let result = {
-                            let mut t = transcriber.lock().unwrap();
-                            t.process()
-                        };
+                        // Process Whisper on a background thread to avoid blocking UI
+                        let transcriber_clone = transcriber.clone();
+                        let (result, full_transcript) = cx.background_executor()
+                            .spawn(async move {
+                                let mut t = transcriber_clone.lock().unwrap();
+                                let result = t.process();
+                                let transcript = t.get_transcript();
+                                (result, transcript)
+                            })
+                            .await;
 
                         match result {
                             Ok(true) => {
-                                // Update the transcript in UI
-                                let full_transcript = {
-                                    let t = transcriber.lock().unwrap();
-                                    t.get_transcript()
-                                };
-
                                 let _ = this.update(cx, |this, cx| {
                                     this.live_transcript = full_transcript;
                                     cx.notify();
                                 });
                             }
                             Ok(false) => {
-                                // No new text from processing, but still update
-                                // in case text was committed during silence
-                                let full_transcript = {
-                                    let t = transcriber.lock().unwrap();
-                                    t.get_transcript()
-                                };
-
                                 let _ = this.update(cx, |this, cx| {
                                     if this.live_transcript != full_transcript {
                                         this.live_transcript = full_transcript;

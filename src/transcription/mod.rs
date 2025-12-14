@@ -222,25 +222,20 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 
 /// Live transcriber for real-time streaming transcription
 ///
-/// Uses a rolling buffer approach based on whisper.cpp stream example:
-/// - Step size: 500ms (process every half second for responsiveness)
-/// - Window size: 5 seconds (analyze 5 seconds at a time)
-/// - Keep: 200ms (overlap between chunks)
-/// - Real-time correction: current window text updates as more audio arrives
+/// Transcribes accumulated audio in real-time with instant feedback.
+/// Unlike a rolling window, this transcribes ALL accumulated audio each cycle,
+/// so no speech is lost. Text updates/corrects as more audio arrives.
 pub struct LiveTranscriber {
     ctx: WhisperContext,
+    /// All accumulated audio samples for current segment
     buffer: Vec<f32>,
     samples_since_last_process: usize,
-    /// Confirmed/committed text (won't change)
-    confirmed_text: String,
-    /// Tentative text from current window (may be corrected)
-    tentative_text: String,
-    /// Number of times we've seen similar tentative text (for committing)
-    stable_count: usize,
+    /// Committed text from previous segments (finalized)
+    committed_text: String,
+    /// Current transcription of the buffer (updates in real-time)
+    current_text: String,
     /// Number of consecutive silent processing cycles
     silence_count: usize,
-    /// Previous tentative text for comparison
-    prev_tentative: String,
     /// Calibrated VAD threshold based on ambient noise
     vad_threshold: f32,
     /// Whether calibration is complete
@@ -252,22 +247,18 @@ pub struct LiveTranscriber {
 impl LiveTranscriber {
     /// Sample rate expected by Whisper
     pub const SAMPLE_RATE: u32 = 16000;
-    /// Process every 500ms (like whisper-stream --step 500)
+    /// Process every 500ms for responsive feedback
     const STEP_SAMPLES: usize = 500 * 16; // 8000 samples = 0.5 seconds
-    /// Analyze 5 seconds at a time (like whisper-stream --length 5000)
-    const WINDOW_SAMPLES: usize = 5 * 16000; // 80000 samples = 5 seconds
-    /// Keep 200ms overlap (like whisper-stream default)
-    const KEEP_SAMPLES: usize = 200 * 16; // 3200 samples = 0.2 seconds
-    /// Calibration duration in samples (1 second - faster startup)
+    /// Maximum buffer size (30 seconds) - commit and clear if exceeded
+    const MAX_BUFFER_SAMPLES: usize = 30 * 16000;
+    /// Calibration duration in samples (1 second)
     const CALIBRATION_SAMPLES: usize = 1 * 16000;
-    /// Minimum VAD threshold (even in quiet rooms) - high to avoid hallucinations
-    const MIN_VAD_THRESHOLD: f32 = 0.03;
+    /// Minimum VAD threshold (even in quiet rooms)
+    const MIN_VAD_THRESHOLD: f32 = 0.02;
     /// Multiplier above ambient noise for VAD threshold
-    const VAD_MULTIPLIER: f32 = 4.0;
-    /// Number of stable iterations before committing text (same text repeated)
-    const STABLE_THRESHOLD: usize = 4; // ~2 seconds at 500ms step
-    /// Number of silent iterations before committing text (faster than stable)
-    const SILENCE_COMMIT_THRESHOLD: usize = 2; // ~1 second of silence
+    const VAD_MULTIPLIER: f32 = 3.0;
+    /// Number of silent iterations before committing (1.5 seconds of silence)
+    const SILENCE_COMMIT_THRESHOLD: usize = 3;
 
     /// Create a new live transcriber with a model
     pub fn new(model_path: &Path) -> Result<Self, String> {
@@ -281,14 +272,12 @@ impl LiveTranscriber {
 
         Ok(Self {
             ctx,
-            buffer: Vec::with_capacity(Self::WINDOW_SAMPLES),
+            buffer: Vec::with_capacity(Self::MAX_BUFFER_SAMPLES),
             samples_since_last_process: 0,
-            confirmed_text: String::new(),
-            tentative_text: String::new(),
-            stable_count: 0,
+            committed_text: String::new(),
+            current_text: String::new(),
             silence_count: 0,
-            prev_tentative: String::new(),
-            vad_threshold: 0.02, // Default, will be calibrated
+            vad_threshold: 0.02,
             calibrated: false,
             calibration_samples: Vec::with_capacity(Self::CALIBRATION_SAMPLES),
         })
@@ -327,13 +316,11 @@ impl LiveTranscriber {
 
         self.buffer.extend_from_slice(samples);
         self.samples_since_last_process += samples.len();
+    }
 
-        // Keep buffer from growing too large - trim to window size + some extra
-        let max_buffer = Self::WINDOW_SAMPLES + Self::STEP_SAMPLES;
-        if self.buffer.len() > max_buffer {
-            let trim_amount = self.buffer.len() - Self::WINDOW_SAMPLES;
-            self.buffer.drain(0..trim_amount);
-        }
+    /// Check if buffer is getting too long and should be force-committed
+    pub fn should_force_commit(&self) -> bool {
+        self.buffer.len() >= Self::MAX_BUFFER_SAMPLES
     }
 
     /// Complete calibration by calculating VAD threshold from ambient noise
@@ -440,32 +427,31 @@ impl LiveTranscriber {
     }
 
     /// Process the current buffer and return transcription update
-    /// Returns (has_update, tentative_text) - tentative text may change as more audio arrives
+    /// Transcribes ALL accumulated audio for real-time feedback
     pub fn process(&mut self) -> Result<bool, String> {
-        if self.buffer.len() < Self::STEP_SAMPLES {
+        if self.buffer.is_empty() {
             return Ok(false);
         }
 
         // Reset counter
         self.samples_since_last_process = 0;
 
-        // Use up to WINDOW_SAMPLES from buffer (most recent audio)
-        let samples_to_process = if self.buffer.len() > Self::WINDOW_SAMPLES {
-            &self.buffer[self.buffer.len() - Self::WINDOW_SAMPLES..]
+        // Check recent audio for VAD (last 500ms)
+        let vad_samples = if self.buffer.len() > Self::STEP_SAMPLES {
+            &self.buffer[self.buffer.len() - Self::STEP_SAMPLES..]
         } else {
             &self.buffer[..]
         };
 
-        // VAD: Check if there's enough audio energy to be speech
-        let rms = Self::calculate_rms(samples_to_process);
-        if rms < self.vad_threshold {
-            // Too quiet - likely silence
-            // If we had tentative text, commit it faster during silence
-            if !self.tentative_text.is_empty() {
-                self.silence_count += 1;
-                if self.silence_count >= Self::SILENCE_COMMIT_THRESHOLD {
-                    self.commit_tentative();
-                }
+        let rms = Self::calculate_rms(vad_samples);
+        let is_silence = rms < self.vad_threshold;
+
+        if is_silence {
+            self.silence_count += 1;
+            // Commit current segment after silence threshold
+            if self.silence_count >= Self::SILENCE_COMMIT_THRESHOLD && !self.current_text.is_empty() {
+                self.commit_segment();
+                return Ok(true);
             }
             return Ok(false);
         }
@@ -473,28 +459,24 @@ impl LiveTranscriber {
         // Speech detected - reset silence counter
         self.silence_count = 0;
 
-        // Set up params for streaming (like whisper-stream)
+        // Transcribe ALL accumulated audio
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_single_segment(true);
         params.set_print_progress(false);
         params.set_print_special(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_no_context(true); // Don't use context from previous - reduces hallucination
-        // Suppress output on silence/noise
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
-        // Create state and run transcription
         let mut state = self.ctx.create_state()
             .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
-        state.full(params, samples_to_process)
+        state.full(params, &self.buffer)
             .map_err(|e| format!("Transcription failed: {}", e))?;
 
-        // Extract text from segments
+        // Extract text from all segments
         let num_segments = state.full_n_segments();
-        let mut window_text = String::new();
+        let mut full_text = String::new();
 
         for i in 0..num_segments {
             if let Some(segment) = state.get_segment(i) {
@@ -502,100 +484,71 @@ impl LiveTranscriber {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
-                // Skip hallucinations
-                if Self::is_hallucination(&text) {
-                    continue;
-                }
-
-                if !text.trim().is_empty() {
-                    if !window_text.is_empty() && !text.starts_with(' ') {
-                        window_text.push(' ');
+                if !text.trim().is_empty() && !Self::is_hallucination(&text) {
+                    if !full_text.is_empty() && !text.starts_with(' ') {
+                        full_text.push(' ');
                     }
-                    window_text.push_str(&text);
+                    full_text.push_str(&text);
                 }
             }
         }
 
-        let window_text = window_text.trim().to_string();
+        let full_text = full_text.trim().to_string();
 
-        // Final check - skip if it's all hallucination
-        // Also require minimum word count - 5 seconds of real speech should have 4+ words
-        let word_count = window_text.split_whitespace().count();
-        if window_text.is_empty() || Self::is_hallucination(&window_text) || word_count < 4 {
-            // Silence detected in transcription - increment stability
-            if !self.tentative_text.is_empty() {
-                self.stable_count += 1;
-                if self.stable_count >= Self::STABLE_THRESHOLD {
-                    self.commit_tentative();
-                }
-            }
-            return Ok(false);
+        // Update current text if changed
+        if !full_text.is_empty() && full_text != self.current_text {
+            self.current_text = full_text;
+            eprintln!("[LIVE] '{}'", &self.current_text[..self.current_text.len().min(80)]);
+            return Ok(true);
         }
 
-        // Check if text is stable (same as previous)
-        if window_text == self.prev_tentative {
-            self.stable_count += 1;
-            if self.stable_count >= Self::STABLE_THRESHOLD {
-                self.commit_tentative();
-            }
-        } else {
-            // Text changed - reset stability counter
-            self.stable_count = 0;
-            self.tentative_text = window_text.clone();
-            self.prev_tentative = window_text;
-        }
-
-        Ok(true)
+        Ok(false)
     }
 
-    /// Commit tentative text to confirmed and clear window
-    fn commit_tentative(&mut self) {
-        if !self.tentative_text.is_empty() {
-            if !self.confirmed_text.is_empty() {
-                self.confirmed_text.push(' ');
+    /// Commit current segment to committed text and start fresh
+    fn commit_segment(&mut self) {
+        if !self.current_text.is_empty() {
+            eprintln!("[COMMIT] '{}' ({} chars)",
+                     &self.current_text[..self.current_text.len().min(60)],
+                     self.current_text.len());
+            if !self.committed_text.is_empty() {
+                self.committed_text.push_str("\n\n"); // Paragraph break between segments
             }
-            self.confirmed_text.push_str(&self.tentative_text);
-            self.tentative_text.clear();
-            self.prev_tentative.clear();
-            self.stable_count = 0;
+            self.committed_text.push_str(&self.current_text);
+            self.current_text.clear();
+            self.buffer.clear(); // Start fresh for next segment
             self.silence_count = 0;
-            // Clear most of the buffer, keeping overlap
-            if self.buffer.len() > Self::KEEP_SAMPLES {
-                let keep_start = self.buffer.len() - Self::KEEP_SAMPLES;
-                self.buffer.drain(0..keep_start);
-            }
         }
     }
 
-    /// Get the full transcript (confirmed + tentative)
+    /// Get the full transcript (committed + current)
     pub fn get_transcript(&self) -> String {
-        if self.confirmed_text.is_empty() {
-            self.tentative_text.clone()
-        } else if self.tentative_text.is_empty() {
-            self.confirmed_text.clone()
+        if self.committed_text.is_empty() {
+            self.current_text.clone()
+        } else if self.current_text.is_empty() {
+            self.committed_text.clone()
         } else {
-            format!("{} {}", self.confirmed_text, self.tentative_text)
+            format!("{}\n\n{}", self.committed_text, self.current_text)
         }
     }
 
-    /// Get just the confirmed (committed) text
+    /// Get just the committed text
     pub fn get_confirmed(&self) -> &str {
-        &self.confirmed_text
+        &self.committed_text
     }
 
-    /// Get just the tentative (may change) text
+    /// Get just the current (live, may change) text
     pub fn get_tentative(&self) -> &str {
-        &self.tentative_text
+        &self.current_text
     }
 
     /// Clear the buffer and all text
     pub fn clear(&mut self) {
+        eprintln!("[CLEAR] Clearing all transcript data");
         self.buffer.clear();
         self.samples_since_last_process = 0;
-        self.confirmed_text.clear();
-        self.tentative_text.clear();
-        self.prev_tentative.clear();
-        self.stable_count = 0;
+        self.committed_text.clear();
+        self.current_text.clear();
         self.silence_count = 0;
         // Reset calibration so it recalibrates on next start
         self.calibrated = false;
