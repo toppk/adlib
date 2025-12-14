@@ -1298,15 +1298,13 @@ impl Adlib {
             .size_full()
             .bg(rgb(0x16213e))
             .child(
-                // Header
+                // Header - centered title
                 div()
                     .px_6()
                     .py_4()
-                    .border_b_1()
-                    .border_color(rgb(0x2d2d44))
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .justify_center()
                     .child(
                         div()
                             .text_2xl()
@@ -1319,36 +1317,7 @@ impl Adlib {
                             } else {
                                 "Live Transcription"
                             }),
-                    )
-                    // Calibration progress bar
-                    .when(is_calibrating && is_running, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xffa500))
-                                        .child("Stay quiet..."),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(100.0))
-                                        .h(px(8.0))
-                                        .bg(rgb(0x2d2d44))
-                                        .rounded_full()
-                                        .child(
-                                            div()
-                                                .h_full()
-                                                .rounded_full()
-                                                .bg(rgb(0xffa500))
-                                                .w(relative(calibration_progress)),
-                                        ),
-                                ),
-                        )
-                    }),
+                    ),
             )
             // Error message
             .when(error.is_some(), |el| {
@@ -1380,7 +1349,7 @@ impl Adlib {
                         ),
                 )
             })
-            // Waveform display
+            // Waveform display with calibration overlay
             .child(
                 div()
                     .px_6()
@@ -1395,6 +1364,7 @@ impl Adlib {
                             .rounded_lg()
                             .border_1()
                             .border_color(rgb(0x2d2d44))
+                            .relative()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1445,25 +1415,63 @@ impl Adlib {
                                                 .rounded_sm()
                                         })),
                                 )
+                            })
+                            // Calibration overlay on top of waveform
+                            .when(is_calibrating && is_running, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .bg(rgba(0x1a1a2edd)) // Semi-transparent overlay
+                                        .rounded_lg()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0xffa500))
+                                                .child("Stay quiet..."),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(150.0))
+                                                .h(px(8.0))
+                                                .bg(rgb(0x2d2d44))
+                                                .rounded_full()
+                                                .child(
+                                                    div()
+                                                        .h_full()
+                                                        .rounded_full()
+                                                        .bg(rgb(0xffa500))
+                                                        .w(relative(calibration_progress)),
+                                                ),
+                                        ),
+                                )
                             }),
                     ),
             )
-            // Transcript area
+            // Transcript area - scroll inside the text box only
             .child(
                 div()
-                    .id("live-transcript-scroll")
                     .flex_grow()
                     .px_6()
                     .py_4()
-                    .overflow_y_scroll()
-                    .overflow_x_hidden()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
                     .child(
                         div()
                             .p_4()
                             .bg(rgb(0x1a1a2e))
                             .rounded_lg()
-                            .min_h(px(200.0))
+                            .flex_grow()
                             .w_full()
+                            .flex()
+                            .flex_col()
                             .overflow_hidden()
                             .child(
                                 div()
@@ -1475,32 +1483,40 @@ impl Adlib {
                             )
                             .child(
                                 div()
-                                    .text_base()
-                                    .text_color(rgb(0xcccccc))
-                                    .child(if transcript.is_empty() {
-                                        if is_running {
-                                            "Listening...".to_string()
-                                        } else {
-                                            "Transcript will appear here".to_string()
-                                        }
-                                    } else {
-                                        // Insert newlines at word boundaries for wrapping
-                                        // (~10 words per line for readable text)
-                                        let words: Vec<&str> = transcript.split_whitespace().collect();
-                                        let mut lines = Vec::new();
-                                        let mut current_line = Vec::new();
-                                        for word in words {
-                                            current_line.push(word);
-                                            if current_line.len() >= 10 {
-                                                lines.push(current_line.join(" "));
-                                                current_line = Vec::new();
-                                            }
-                                        }
-                                        if !current_line.is_empty() {
-                                            lines.push(current_line.join(" "));
-                                        }
-                                        lines.join("\n")
-                                    }),
+                                    .id("live-transcript-scroll")
+                                    .flex_grow()
+                                    .overflow_y_scroll()
+                                    .overflow_x_hidden()
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .text_color(rgb(0xcccccc))
+                                            .child(if transcript.is_empty() {
+                                                if is_running {
+                                                    "Listening...".to_string()
+                                                } else {
+                                                    "Transcript will appear here".to_string()
+                                                }
+                                            } else {
+                                                // Insert newlines at word boundaries for wrapping
+                                                // (~10 words per line for readable text)
+                                                let words: Vec<&str> =
+                                                    transcript.split_whitespace().collect();
+                                                let mut lines = Vec::new();
+                                                let mut current_line = Vec::new();
+                                                for word in words {
+                                                    current_line.push(word);
+                                                    if current_line.len() >= 10 {
+                                                        lines.push(current_line.join(" "));
+                                                        current_line = Vec::new();
+                                                    }
+                                                }
+                                                if !current_line.is_empty() {
+                                                    lines.push(current_line.join(" "));
+                                                }
+                                                lines.join("\n")
+                                            }),
+                                    ),
                             ),
                     ),
             )

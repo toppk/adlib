@@ -236,8 +236,10 @@ pub struct LiveTranscriber {
     vad_threshold: f32,
     /// Whether calibration is complete
     calibrated: bool,
-    /// Samples collected during calibration
+    /// Samples collected during calibration (3 seconds of quiet audio)
     calibration_samples: Vec<f32>,
+    /// Consecutive quiet samples collected (reset if loud audio detected)
+    quiet_streak_samples: usize,
 }
 
 impl LiveTranscriber {
@@ -247,8 +249,13 @@ impl LiveTranscriber {
     const STEP_SAMPLES: usize = 500 * 16; // 8000 samples = 0.5 seconds
     /// Maximum buffer size (30 seconds) - commit and clear if exceeded
     const MAX_BUFFER_SAMPLES: usize = 30 * 16000;
-    /// Calibration duration in samples (1 second)
-    const CALIBRATION_SAMPLES: usize = 16000;
+    /// Calibration duration in samples (3 seconds of quiet audio)
+    const CALIBRATION_SAMPLES: usize = 3 * 16000;
+    /// Chunk size for checking if audio is quiet (100ms)
+    const CALIBRATION_CHUNK_SAMPLES: usize = 1600;
+    /// Pre-calibration threshold to detect "quiet" audio
+    /// This is a fixed threshold used before we know the actual ambient noise level
+    const PRE_CALIBRATION_QUIET_THRESHOLD: f32 = 0.04;
     /// Minimum VAD threshold (even in quiet rooms)
     const MIN_VAD_THRESHOLD: f32 = 0.02;
     /// Multiplier above ambient noise for VAD threshold
@@ -276,6 +283,7 @@ impl LiveTranscriber {
             vad_threshold: 0.02,
             calibrated: false,
             calibration_samples: Vec::with_capacity(Self::CALIBRATION_SAMPLES),
+            quiet_streak_samples: 0,
         })
     }
 
@@ -295,18 +303,46 @@ impl LiveTranscriber {
 
     /// Add new audio samples to the buffer
     pub fn add_samples(&mut self, samples: &[f32]) {
-        // During calibration, collect samples to measure ambient noise
+        // During calibration, wait for 3 seconds of quiet audio
         if !self.calibrated {
-            let remaining = Self::CALIBRATION_SAMPLES - self.calibration_samples.len();
-            if remaining > 0 {
-                let to_add = samples.len().min(remaining);
-                self.calibration_samples
-                    .extend_from_slice(&samples[..to_add]);
+            // Process samples in chunks to check quietness
+            let mut offset = 0;
+            while offset < samples.len() {
+                let chunk_end = (offset + Self::CALIBRATION_CHUNK_SAMPLES).min(samples.len());
+                let chunk = &samples[offset..chunk_end];
 
-                // Check if calibration is complete
-                if self.calibration_samples.len() >= Self::CALIBRATION_SAMPLES {
-                    self.complete_calibration();
+                // Check if this chunk is quiet
+                let chunk_rms = Self::calculate_rms(chunk);
+                let is_quiet = chunk_rms < Self::PRE_CALIBRATION_QUIET_THRESHOLD;
+
+                if is_quiet {
+                    // Add to calibration samples
+                    self.calibration_samples.extend_from_slice(chunk);
+                    self.quiet_streak_samples += chunk.len();
+
+                    // Check if we have enough quiet samples
+                    if self.calibration_samples.len() >= Self::CALIBRATION_SAMPLES {
+                        self.complete_calibration();
+                        // Process any remaining samples normally
+                        if chunk_end < samples.len() {
+                            self.buffer.extend_from_slice(&samples[chunk_end..]);
+                            self.samples_since_last_process += samples.len() - chunk_end;
+                        }
+                        return;
+                    }
+                } else {
+                    // Loud audio detected - reset calibration
+                    if !self.calibration_samples.is_empty() {
+                        eprintln!(
+                            "[CALIBRATION] Reset - loud audio detected (RMS: {:.4})",
+                            chunk_rms
+                        );
+                    }
+                    self.calibration_samples.clear();
+                    self.quiet_streak_samples = 0;
                 }
+
+                offset = chunk_end;
             }
             return; // Don't add to main buffer during calibration
         }
@@ -636,6 +672,7 @@ impl LiveTranscriber {
         // Reset calibration so it recalibrates on next start
         self.calibrated = false;
         self.calibration_samples.clear();
+        self.quiet_streak_samples = 0;
         self.vad_threshold = 0.02;
     }
 
