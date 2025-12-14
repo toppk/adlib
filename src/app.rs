@@ -1,11 +1,14 @@
 //! Main application component for Adlib
 
 use crate::audio::{AudioCapture, AudioPlayer, CaptureState, SharedCaptureState, SharedPlaybackState, WavRecorder};
-use crate::models::RecordingInfo;
+use crate::models::{RecordingInfo, Transcription, TranscriptionStatus};
 use crate::state::{ActiveView, AppState, RecordingsDatabase};
+use crate::transcription::{TranscriptionEngine, TranscriptionOptions};
+use crate::whisper::{ModelManager, ProgressTracker, WhisperModel};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, *};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The root application view
@@ -20,6 +23,18 @@ pub struct Adlib {
     loaded_recording_path: Option<PathBuf>,
     /// Error message from last load attempt
     load_error: Option<String>,
+    /// Model manager for Whisper models
+    model_manager: Arc<Mutex<ModelManager>>,
+    /// Currently downloading model with progress tracker
+    active_download: Option<(WhisperModel, ProgressTracker)>,
+    /// Queue of models waiting to download
+    download_queue: Vec<WhisperModel>,
+    /// Last download error (for UI feedback)
+    download_error: Option<String>,
+    /// Currently transcribing file (if any)
+    transcribing_file: Option<String>,
+    /// Transcription status message
+    transcription_status: Option<String>,
     _ui_refresh_task: Option<Task<()>>,
 }
 
@@ -43,6 +58,15 @@ impl Adlib {
         let audio_player = AudioPlayer::new();
         let playback_state = audio_player.shared_state();
 
+        // Initialize model manager
+        let model_manager = match ModelManager::new() {
+            Ok(mm) => Arc::new(Mutex::new(mm)),
+            Err(e) => {
+                eprintln!("Failed to create model manager: {}", e);
+                Arc::new(Mutex::new(ModelManager::default()))
+            }
+        };
+
         Self {
             state,
             database,
@@ -52,6 +76,12 @@ impl Adlib {
             playback_state,
             loaded_recording_path: None,
             load_error: None,
+            model_manager,
+            active_download: None,
+            download_queue: Vec::new(),
+            download_error: None,
+            transcribing_file: None,
+            transcription_status: None,
             _ui_refresh_task: None,
         }
     }
@@ -232,6 +262,307 @@ impl Adlib {
         self.state.recordings.insert(0, recording);
         self.save_recordings_to_db();
     }
+
+    /// Queue a model for download
+    fn queue_model_download(&mut self, model: WhisperModel, cx: &mut Context<Self>) {
+        // Don't queue if already downloaded
+        if self.is_model_downloaded(model) {
+            return;
+        }
+
+        // Don't queue if already in queue or actively downloading
+        if self.active_download.as_ref().map(|(m, _)| *m) == Some(model) {
+            return;
+        }
+        if self.download_queue.contains(&model) {
+            return;
+        }
+
+        self.download_queue.push(model);
+        self.download_error = None;
+
+        // Start download if nothing is active
+        if self.active_download.is_none() {
+            self.process_download_queue(cx);
+        }
+    }
+
+    /// Process the next item in the download queue
+    fn process_download_queue(&mut self, cx: &mut Context<Self>) {
+        // Don't start if already downloading
+        if self.active_download.is_some() {
+            return;
+        }
+
+        // Get next model from queue
+        let Some(model) = self.download_queue.first().copied() else {
+            return;
+        };
+        self.download_queue.remove(0);
+
+        let progress = ProgressTracker::new();
+        self.active_download = Some((model, progress.clone()));
+        self.download_error = None;
+
+        // Get cache_dir and repo_id from manager (quick lock, then release)
+        let (cache_dir, repo_id) = {
+            let manager = self.model_manager.lock().unwrap();
+            (manager.cache_dir().clone(), "ggerganov/whisper.cpp".to_string())
+        };
+
+        // Spawn download task - does NOT hold the mutex lock
+        cx.spawn({
+            let progress = progress.clone();
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                // Run the download in a background thread
+                // Uses static method - no mutex needed!
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let progress = progress.clone();
+                        async move {
+                            crate::whisper::ModelManager::download_model_with_progress(
+                                model, cache_dir, repo_id, progress
+                            )
+                        }
+                    })
+                    .await;
+
+                // Update UI when done and process next in queue
+                if let Some(this) = this.upgrade() {
+                    let _ = cx.update_entity(&this, |this, cx| {
+                        this.active_download = None;
+
+                        if let Err(e) = result {
+                            this.download_error = Some(format!("Failed to download {}: {}", model.display_name(), e));
+                        }
+
+                        // Process next in queue
+                        this.process_download_queue(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+
+        // Start UI refresh for progress
+        self.start_download_progress_refresh(cx);
+    }
+
+    /// Start UI refresh task for download progress
+    fn start_download_progress_refresh(&mut self, cx: &mut Context<Self>) {
+        self._ui_refresh_task = Some(cx.spawn({
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    // Wait before next refresh
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+
+                    // Check if still downloading
+                    let Some(this_ref) = this.upgrade() else {
+                        break;
+                    };
+
+                    let should_continue = cx.update_entity(&this_ref, |this, cx| {
+                        let still_downloading = this.active_download.is_some();
+                        cx.notify();
+                        still_downloading
+                    });
+
+                    match should_continue {
+                        Ok(true) => continue,
+                        _ => break,
+                    }
+                }
+            }
+        }));
+    }
+
+    /// Cancel the current download
+    fn cancel_download(&mut self, cx: &mut Context<Self>) {
+        if let Some((model, progress)) = self.active_download.take() {
+            progress.cancel();
+            self.download_error = Some(format!("{} download cancelled", model.display_name()));
+        }
+        // Process next in queue
+        self.process_download_queue(cx);
+    }
+
+    /// Check if a model is downloaded
+    fn is_model_downloaded(&self, model: WhisperModel) -> bool {
+        let manager = self.model_manager.lock().unwrap();
+        manager.is_model_downloaded(model)
+    }
+
+    /// Check if a model is queued for download
+    fn is_model_queued(&self, model: WhisperModel) -> bool {
+        self.download_queue.contains(&model)
+    }
+
+    /// Check if a model is actively downloading
+    fn is_model_downloading(&self, model: WhisperModel) -> bool {
+        self.active_download.as_ref().map(|(m, _)| *m) == Some(model)
+    }
+
+    /// Get download progress for active download (0.0 - 1.0)
+    fn get_download_progress(&self) -> f32 {
+        self.active_download
+            .as_ref()
+            .map(|(_, p)| p.get_progress().progress)
+            .unwrap_or(0.0)
+    }
+
+    /// Select a model (only if downloaded)
+    fn select_model(&mut self, model: WhisperModel) {
+        if self.is_model_downloaded(model) {
+            self.state.settings.selected_model_name = model.short_name().to_string();
+        }
+    }
+
+    /// Delete a downloaded model
+    fn delete_model(&mut self, model: WhisperModel) {
+        let manager = self.model_manager.lock().unwrap();
+        if let Err(e) = manager.delete_model(model) {
+            self.download_error = Some(format!("Failed to delete {}: {}", model.display_name(), e));
+        } else {
+            // Reset selection if we deleted the selected model
+            if self.state.settings.selected_model_name == model.short_name() {
+                self.state.settings.selected_model_name = String::new();
+            }
+        }
+    }
+
+    /// Delete all downloaded models
+    fn delete_all_models(&mut self) {
+        let manager = self.model_manager.lock().unwrap();
+        if let Err(e) = manager.delete_all_models() {
+            self.download_error = Some(format!("Failed to delete models: {}", e));
+        } else {
+            self.state.settings.selected_model_name = String::new();
+        }
+    }
+
+    /// Start transcribing a recording
+    fn start_transcription(&mut self, file_name: &str, cx: &mut Context<Self>) {
+        // Don't start if already transcribing
+        if self.transcribing_file.is_some() {
+            return;
+        }
+
+        // Get the selected model
+        let selected_model_name = self.state.settings.selected_model_name.clone();
+        if selected_model_name.is_empty() {
+            self.transcription_status = Some("No model selected. Go to Settings to download and select a model.".to_string());
+            return;
+        }
+
+        // Find the model and check if it's downloaded
+        let model = WhisperModel::recommended()
+            .iter()
+            .find(|m| m.short_name() == selected_model_name)
+            .copied();
+
+        let Some(model) = model else {
+            self.transcription_status = Some("Selected model not found".to_string());
+            return;
+        };
+
+        // Get the model path
+        let model_path = {
+            let manager = self.model_manager.lock().unwrap();
+            manager.get_cached_model_path(model)
+        };
+
+        let Some(model_path) = model_path else {
+            self.transcription_status = Some(format!("Model {} is not downloaded", model.display_name()));
+            return;
+        };
+
+        // Get the recording path
+        let recordings_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("adlib")
+            .join("recordings");
+        let wav_path = recordings_dir.join(file_name);
+
+        if !wav_path.exists() {
+            self.transcription_status = Some("Recording file not found".to_string());
+            return;
+        }
+
+        self.transcribing_file = Some(file_name.to_string());
+        self.transcription_status = Some("Loading model...".to_string());
+
+        let file_name_clone = file_name.to_string();
+
+        // Spawn transcription task
+        cx.spawn({
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                // Update status to transcribing
+                if let Some(this) = this.upgrade() {
+                    let _ = cx.update_entity(&this, |this, cx| {
+                        this.transcription_status = Some("Transcribing...".to_string());
+                        cx.notify();
+                    });
+                }
+
+                // Run transcription in background thread
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let model_path = model_path.clone();
+                        let wav_path = wav_path.clone();
+                        async move {
+                            // Load the model
+                            let engine = TranscriptionEngine::new(&model_path)?;
+
+                            // Transcribe the file
+                            let options = TranscriptionOptions::default();
+                            engine.transcribe_file(&wav_path, &options)
+                        }
+                    })
+                    .await;
+
+                // Update UI with result
+                if let Some(this) = this.upgrade() {
+                    let _ = cx.update_entity(&this, |this, cx| {
+                        this.transcribing_file = None;
+
+                        match result {
+                            Ok(transcription_result) => {
+                                this.transcription_status = Some("Transcription complete!".to_string());
+
+                                // Update the recording with transcription
+                                if let Some(recording) = this.state.get_recording_mut(&file_name_clone) {
+                                    let mut transcription = Transcription::new(
+                                        file_name_clone.clone(),
+                                        model.display_name().to_string(),
+                                        Default::default(),
+                                    );
+                                    transcription.text = transcription_result.text;
+                                    transcription.status = TranscriptionStatus::Done;
+                                    recording.transcription = Some(transcription);
+                                }
+
+                                // Save to database
+                                if let Err(e) = this.database.save(&this.state.recordings) {
+                                    eprintln!("Failed to save transcription: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                this.transcription_status = Some(format!("Transcription failed: {}", e));
+                            }
+                        }
+
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
 }
 
 impl Render for Adlib {
@@ -241,6 +572,13 @@ impl Render for Adlib {
         let is_record = matches!(active_view, ActiveView::Record);
         let is_list = matches!(active_view, ActiveView::RecordingList);
         let is_settings = matches!(active_view, ActiveView::Settings);
+
+        // Download status for sidebar
+        let has_active_download = self.active_download.is_some();
+        let download_model_name = self.active_download.as_ref().map(|(m, _)| m.display_name());
+        let download_progress = self.get_download_progress();
+        let queue_count = self.download_queue.len();
+        let download_error = self.download_error.clone();
 
         div()
             .size_full()
@@ -455,6 +793,89 @@ impl Render for Adlib {
                                     .child("Settings"),
                             ),
                     )
+                    // Download status (when active)
+                    .when(has_active_download || download_error.is_some(), |el| {
+                        el.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .border_t_1()
+                                .border_color(rgb(0x2d2d44))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                // Error message
+                                .when(download_error.is_some(), |el| {
+                                    let err = download_error.clone().unwrap_or_default();
+                                    el.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xf44336))
+                                            .child(err),
+                                    )
+                                })
+                                // Active download
+                                .when(has_active_download, |el| {
+                                    let model_name = download_model_name.unwrap_or("Model");
+                                    let progress_pct = (download_progress * 100.0) as u32;
+                                    el.child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .justify_between()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0xcccccc))
+                                                            .child(format!("Downloading {}", model_name)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("cancel-download")
+                                                            .text_xs()
+                                                            .text_color(rgb(0xf44336))
+                                                            .cursor_pointer()
+                                                            .hover(|s| s.text_color(rgb(0xff6666)))
+                                                            .on_click(cx.listener(|this, _, _w, cx| {
+                                                                this.cancel_download(cx);
+                                                            }))
+                                                            .child("Cancel"),
+                                                    ),
+                                            )
+                                            .child(
+                                                // Progress bar
+                                                div()
+                                                    .w_full()
+                                                    .h(px(4.0))
+                                                    .bg(rgb(0x2d2d44))
+                                                    .rounded_full()
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .rounded_full()
+                                                            .bg(rgb(0xFF9800))
+                                                            .w(relative(download_progress)),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x888888))
+                                                    .child(if queue_count > 0 {
+                                                        format!("{}% ({} queued)", progress_pct, queue_count)
+                                                    } else {
+                                                        format!("{}%", progress_pct)
+                                                    }),
+                                            ),
+                                    )
+                                }),
+                        )
+                    })
                     .child(
                         // Help hint at bottom
                         div()
@@ -483,7 +904,7 @@ impl Render for Adlib {
                             self.render_recording_details(&id, cx).into_any_element()
                         }
                         ActiveView::Settings => {
-                            self.render_settings().into_any_element()
+                            self.render_settings(cx).into_any_element()
                         }
                     })
                     .when(show_help, |el| el.child(render_help_overlay())),
@@ -1198,66 +1619,290 @@ impl Adlib {
                                 el.child(div().text_base().text_color(rgb(0xcccccc)).child(text))
                             }),
                     )
-                    .child(
+                    .child({
+                        let is_transcribing = self.transcribing_file.as_ref() == Some(&file_name);
+                        let transcription_status = self.transcription_status.clone();
+                        let file_name_for_transcribe = file_name.clone();
+
                         div()
                             .px_6()
                             .py_3()
                             .border_t_1()
                             .border_color(rgb(0x2d2d44))
                             .flex()
-                            .gap_3()
+                            .flex_col()
+                            .gap_2()
+                            // Status message row
+                            .when(transcription_status.is_some(), |el| {
+                                let status = transcription_status.clone().unwrap_or_default();
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(if status.contains("failed") || status.contains("not") {
+                                            rgb(0xf44336)
+                                        } else if status.contains("complete") {
+                                            rgb(0x4CAF50)
+                                        } else {
+                                            rgb(0xFF9800)
+                                        })
+                                        .child(status),
+                                )
+                            })
+                            // Buttons row
                             .child(
                                 div()
-                                    .id("transcribe-btn")
-                                    .px_4()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x4CAF50))
-                                    .text_sm()
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .hover(|style| style.opacity(0.9))
-                                    .child("Transcribe"),
+                                    .flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .id("transcribe-btn")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if is_transcribing { rgb(0x666666) } else { rgb(0x4CAF50) })
+                                            .text_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .when(!is_transcribing, |el| {
+                                                el.cursor_pointer()
+                                                    .hover(|style| style.opacity(0.9))
+                                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                                        this.start_transcription(&file_name_for_transcribe, cx);
+                                                    }))
+                                            })
+                                            .child(if is_transcribing { "Transcribing..." } else { "Transcribe" }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("export-btn")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(0x2d2d44))
+                                            .text_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x3d3d54)))
+                                            .child("Export Audio"),
+                                    )
+                                    .child(div().flex_grow())
+                                    .child(
+                                        div()
+                                            .id("delete-btn")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(0xf44336))
+                                            .text_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .hover(|style| style.opacity(0.9))
+                                            .child("Delete"),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .id("export-btn")
-                                    .px_4()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x2d2d44))
-                                    .text_sm()
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x3d3d54)))
-                                    .child("Export Audio"),
-                            )
-                            .child(div().flex_grow())
-                            .child(
-                                div()
-                                    .id("delete-btn")
-                                    .px_4()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0xf44336))
-                                    .text_sm()
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .hover(|style| style.opacity(0.9))
-                                    .child("Delete"),
-                            ),
-                    )
+                    })
             }
         }
     }
 
-    fn render_settings(&self) -> impl IntoElement {
+    /// Render a downloaded model row with Select and Delete buttons
+    fn render_downloaded_model_row(
+        &self,
+        model: WhisperModel,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let model_name = model.display_name();
+        let short_name = model.short_name();
+
+        div()
+            .id(SharedString::from(format!("model-dl-{}", short_name)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(if is_selected { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
+            .border_1()
+            .border_color(if is_selected { rgb(0xe94560) } else { rgb(0x2d2d44) })
+            // Model name
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0xffffff))
+                    .child(model_name),
+            )
+            // Action buttons
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    // Select button (if not already selected)
+                    .when(!is_selected, |el| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("select-{}", short_name)))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(0x4a9eff))
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.8))
+                                .on_click(cx.listener(move |this, _, _w, cx| {
+                                    this.select_model(model);
+                                    cx.notify();
+                                }))
+                                .child("Select"),
+                        )
+                    })
+                    // Selected indicator
+                    .when(is_selected, |el| {
+                        el.child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(0xe94560))
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .child("Selected"),
+                        )
+                    })
+                    // Delete button
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("delete-{}", short_name)))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x2d2d44))
+                            .text_xs()
+                            .text_color(rgb(0xf44336))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x3d3d54)))
+                            .on_click(cx.listener(move |this, _, _w, cx| {
+                                this.delete_model(model);
+                                cx.notify();
+                            }))
+                            .child("Delete"),
+                    ),
+            )
+    }
+
+    /// Render an available (not downloaded) model row with Download button
+    fn render_available_model_row(
+        &self,
+        model: WhisperModel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let model_name = model.display_name();
+        let short_name = model.short_name();
+        let is_downloading = self.is_model_downloading(model);
+        let is_queued = self.is_model_queued(model);
+
+        div()
+            .id(SharedString::from(format!("model-av-{}", short_name)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(rgb(0x1a1a2e))
+            .border_1()
+            .border_color(rgb(0x2d2d44))
+            // Model name
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0x888888))
+                    .child(model_name),
+            )
+            // Action button
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    // Downloading indicator
+                    .when(is_downloading, |el| {
+                        el.child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(0xFF9800))
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .child("Downloading..."),
+                        )
+                    })
+                    // Queued indicator
+                    .when(is_queued && !is_downloading, |el| {
+                        el.child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(0x2d2d44))
+                                .text_xs()
+                                .text_color(rgb(0x888888))
+                                .child("Queued"),
+                        )
+                    })
+                    // Download button
+                    .when(!is_downloading && !is_queued, |el| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("download-{}", short_name)))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(0x4CAF50))
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.8))
+                                .on_click(cx.listener(move |this, _, _w, cx| {
+                                    this.queue_model_download(model, cx);
+                                    cx.notify();
+                                }))
+                                .child("Download"),
+                        )
+                    }),
+            )
+    }
+
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_model = self.state.settings.selected_model_name.clone();
         let is_vad = self.state.settings.is_vad_enabled;
         let is_gpu = self.state.settings.is_using_gpu;
         let is_live = self.state.settings.is_live_transcription_enabled;
         let should_translate = self.state.settings.parameters.should_translate;
         let language = self.state.settings.parameters.language.clone();
+
+        // Separate downloaded and available models
+        let downloaded_models: Vec<(WhisperModel, bool)> = WhisperModel::recommended()
+            .iter()
+            .filter(|&&model| self.is_model_downloaded(model))
+            .map(|&model| {
+                let is_selected = model.short_name() == selected_model;
+                (model, is_selected)
+            })
+            .collect();
+
+        let available_models: Vec<WhisperModel> = WhisperModel::recommended()
+            .iter()
+            .filter(|&&model| !self.is_model_downloaded(model))
+            .copied()
+            .collect();
+
+        let has_downloaded = !downloaded_models.is_empty();
 
         div()
             .flex()
@@ -1287,43 +1932,61 @@ impl Adlib {
                     .p_6()
                     .flex_grow()
                     .overflow_y_scroll()
-                    // Model Selection
+                    // Downloaded Models Section
+                    .when(has_downloaded, |el| {
+                        el.child(settings_section(
+                            "Downloaded Models",
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .children(downloaded_models.into_iter().map(|(model, is_selected)| {
+                                    self.render_downloaded_model_row(model, is_selected, cx)
+                                }))
+                                .child(
+                                    // Delete All button
+                                    div()
+                                        .id("delete-all-models")
+                                        .mt_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .bg(rgb(0x2d2d44))
+                                        .text_xs()
+                                        .text_color(rgb(0xf44336))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(0x3d3d54)))
+                                        .on_click(cx.listener(|this, _, _w, cx| {
+                                            this.delete_all_models();
+                                            cx.notify();
+                                        }))
+                                        .child("Delete All Models"),
+                                ),
+                        ))
+                    })
+                    // Available Models Section
                     .child(settings_section(
-                        "Whisper Model",
+                        "Available Models",
                         div()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_2()
+                            .when(available_models.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x888888))
+                                        .child("All models downloaded"),
+                                )
+                            })
+                            .when(!available_models.is_empty(), |el| {
+                                el.children(available_models.into_iter().map(|model| {
+                                    self.render_available_model_row(model, cx)
+                                }))
+                            })
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(rgb(0x888888))
-                                    .child("Selected Model"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .child(model_option("tiny", "~75MB", selected_model == "tiny"))
-                                    .child(model_option("base", "~150MB", selected_model == "base"))
-                                    .child(model_option(
-                                        "small",
-                                        "~500MB",
-                                        selected_model == "small",
-                                    ))
-                                    .child(model_option(
-                                        "medium",
-                                        "~1.5GB",
-                                        selected_model == "medium",
-                                    ))
-                                    .child(model_option(
-                                        "large",
-                                        "~3GB",
-                                        selected_model == "large",
-                                    )),
-                            )
-                            .child(
-                                div()
+                                    .mt_2()
                                     .text_xs()
                                     .text_color(rgb(0x666666))
                                     .child("Larger models are more accurate but slower"),

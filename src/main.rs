@@ -6,6 +6,8 @@ mod app;
 mod audio;
 mod models;
 mod state;
+mod transcription;
+mod whisper;
 
 use app::Adlib;
 use gpui::prelude::*;

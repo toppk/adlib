@@ -73,6 +73,11 @@ class RecordingCardState:
   - **Storage & Sync**: show free/used space, delete recordings, delete all models, toggle iCloud sync (copy WAVs to iCloud Drive).
   - **About/Links**: GitHub, website, rate app, bug/feature links.
 - Derived fields: app version/build number, storage percentages.
+- Model downloads in UI:
+  - Available vs downloaded models are listed separately; disabled models are surfaced but not selectable.
+  - Tapping download starts a load with progress; a single active download is tracked, additional taps queue up.
+  - Cancel button stops the active download; queue drains sequentially.
+  - “Delete” removes a specific model; “Delete All” wipes the cache and resets selection to default.
 
 ## Share Extension (Import UX)
 - Separate target on iOS that ingests shared audio, converts to WAV, and writes to the shared app-group folder.
