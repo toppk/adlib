@@ -1,7 +1,7 @@
 //! Main application component for Adlib
 
 use crate::audio::{AudioCapture, AudioPlayer, CaptureState, SharedCaptureState, SharedPlaybackState, WavRecorder};
-use crate::models::{RecordingInfo, Transcription, TranscriptionStatus};
+use crate::models::{RecordingInfo, Segment, Transcription, TranscriptionStatus};
 use crate::state::{ActiveView, AppState, RecordingsDatabase};
 use crate::transcription::{TranscriptionEngine, TranscriptionOptions};
 use crate::whisper::{ModelManager, ProgressTracker, WhisperModel};
@@ -543,6 +543,20 @@ impl Adlib {
                                     );
                                     transcription.text = transcription_result.text;
                                     transcription.status = TranscriptionStatus::Done;
+
+                                    // Store timestamped segments for karaoke-style display
+                                    transcription.segments = transcription_result.segments
+                                        .into_iter()
+                                        .map(|seg| Segment {
+                                            start_ms: (seg.start * 1000.0) as i64,
+                                            end_ms: (seg.end * 1000.0) as i64,
+                                            text: seg.text,
+                                            tokens: Vec::new(),
+                                            speaker: None,
+                                            words: Vec::new(),
+                                        })
+                                        .collect();
+
                                     recording.transcription = Some(transcription);
                                 }
 
@@ -1378,6 +1392,14 @@ impl Adlib {
                 let title = recording.title.clone();
                 let file_name = recording.file_name.clone();
 
+                // Get segments for karaoke display
+                let segments = recording.transcription
+                    .as_ref()
+                    .map(|t| t.segments.clone())
+                    .unwrap_or_default();
+                let has_segments = !segments.is_empty();
+                let current_time_ms = (current_time * 1000.0) as i64;
+
                 // Check if the audio file exists
                 let file_exists = self.recording_exists(&file_name);
                 let load_error = self.load_error.clone();
@@ -1615,7 +1637,37 @@ impl Adlib {
                                         ),
                                 )
                             })
-                            .when(has_text, |el| {
+                            // Karaoke-style segment display
+                            .when(has_segments, |el| {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_1()
+                                        .children(segments.iter().enumerate().map(|(i, seg)| {
+                                            let is_current = current_time_ms >= seg.start_ms && current_time_ms < seg.end_ms;
+                                            let is_past = current_time_ms >= seg.end_ms;
+
+                                            div()
+                                                .id(SharedString::from(format!("seg-{}", i)))
+                                                .px_1()
+                                                .py_px()
+                                                .rounded_sm()
+                                                .text_base()
+                                                .bg(if is_current { rgb(0xe94560) } else { rgb(0x1a1a2e) })
+                                                .text_color(if is_current {
+                                                    rgb(0xffffff)
+                                                } else if is_past {
+                                                    rgb(0xcccccc)
+                                                } else {
+                                                    rgb(0x666666)
+                                                })
+                                                .child(seg.text.clone())
+                                        })),
+                                )
+                            })
+                            // Fallback: plain text if we have text but no segments
+                            .when(has_text && !has_segments, |el| {
                                 el.child(div().text_base().text_color(rgb(0xcccccc)).child(text))
                             }),
                     )
