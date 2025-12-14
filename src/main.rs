@@ -7,6 +7,7 @@ mod assets;
 mod audio;
 mod models;
 mod state;
+mod tokio_runtime;
 mod transcription;
 mod whisper;
 
@@ -17,6 +18,8 @@ use gpui::*;
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        // Initialize global Tokio runtime for hf-hub/reqwest async operations
+        tokio_runtime::init(cx);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {

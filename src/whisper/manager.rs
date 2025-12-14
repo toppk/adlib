@@ -4,11 +4,11 @@
 
 #![allow(dead_code)]
 
-use hf_hub::api::sync::ApiBuilder;
+use hf_hub::api::tokio::{ApiBuilder, Progress};
 use hf_hub::Cache;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -272,6 +272,33 @@ impl Default for ProgressTracker {
     }
 }
 
+/// Wrapper to implement hf-hub's Progress trait for ProgressTracker
+#[derive(Clone)]
+pub struct ProgressReporter {
+    tracker: ProgressTracker,
+}
+
+impl ProgressReporter {
+    pub fn new(tracker: ProgressTracker) -> Self {
+        Self { tracker }
+    }
+}
+
+impl Progress for ProgressReporter {
+    async fn init(&mut self, size: usize, _filename: &str) {
+        self.tracker.set_total(size as u64);
+    }
+
+    async fn update(&mut self, size: usize) {
+        let current = self.tracker.downloaded.load(Ordering::SeqCst);
+        self.tracker.set_downloaded(current + size as u64);
+    }
+
+    async fn finish(&mut self) {
+        self.tracker.set_complete();
+    }
+}
+
 /// Manager for Whisper models
 pub struct ModelManager {
     /// Local cache directory for models
@@ -371,50 +398,38 @@ impl ModelManager {
             .collect()
     }
 
-    /// Download a model (blocking) - creates a fresh API client
-    /// Returns the path to the downloaded model
-    pub fn download_model(
-        model: WhisperModel,
-        cache_dir: &Path,
-        repo_id: &str,
-    ) -> Result<PathBuf, String> {
-        // Create API client for this download
-        let api = ApiBuilder::new()
-            .with_cache_dir(cache_dir.to_path_buf())
-            .build()
-            .map_err(|e| format!("Failed to create HuggingFace API: {}", e))?;
-
-        let repo = api.model(repo_id.to_string());
-
-        let path = repo
-            .get(model.file_name())
-            .map_err(|e| format!("Failed to download model {}: {}", model.display_name(), e))?;
-
-        Ok(path)
-    }
-
-    /// Download a model with progress tracking (blocking)
+    /// Download a model with progress tracking (async)
     /// This is a static method that doesn't require holding the manager lock
-    pub fn download_model_with_progress(
+    pub async fn download_model_with_progress(
         model: WhisperModel,
         cache_dir: PathBuf,
         repo_id: String,
         progress: ProgressTracker,
     ) -> Result<PathBuf, String> {
-        // Set expected total size
-        progress.set_total(model.size_bytes());
-
         // Check for cancellation
         if progress.is_cancelled() {
             return Err("Download cancelled".to_string());
         }
 
-        // Download the model
-        let result = Self::download_model(model, &cache_dir, &repo_id);
+        // Create async API client
+        let api = ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .map_err(|e| format!("Failed to create HuggingFace API: {}", e))?;
+
+        let repo = api.model(repo_id);
+
+        // Create progress reporter
+        let reporter = ProgressReporter::new(progress.clone());
+
+        // Download with progress tracking
+        let result = repo
+            .download_with_progress(model.file_name(), reporter)
+            .await
+            .map_err(|e| format!("Failed to download model {}: {}", model.display_name(), e));
 
         match &result {
             Ok(_) => {
-                progress.set_downloaded(model.size_bytes());
                 progress.set_complete();
             }
             Err(e) => {

@@ -54,6 +54,8 @@ pub struct Adlib {
     live_duration: f64,
     /// Live transcription error (if any)
     live_error: Option<String>,
+    /// Show delete all models confirmation dialog
+    show_delete_all_confirmation: bool,
 }
 
 impl Adlib {
@@ -109,6 +111,7 @@ impl Adlib {
             live_capture_state: None,
             live_duration: 0.0,
             live_error: None,
+            show_delete_all_confirmation: false,
         }
     }
 
@@ -339,35 +342,36 @@ impl Adlib {
             )
         };
 
-        // Spawn download task - does NOT hold the mutex lock
+        // Spawn download on Tokio runtime (required by hf-hub/reqwest)
+        let download_task = crate::tokio_runtime::spawn(cx, async move {
+            crate::whisper::ModelManager::download_model_with_progress(
+                model, cache_dir, repo_id, progress,
+            )
+            .await
+        });
+
+        // Handle result in GPUI context
         cx.spawn({
-            let progress = progress.clone();
             async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                // Run the download in a background thread
-                // Uses static method - no mutex needed!
-                let result = cx
-                    .background_executor()
-                    .spawn({
-                        let progress = progress.clone();
-                        async move {
-                            crate::whisper::ModelManager::download_model_with_progress(
-                                model, cache_dir, repo_id, progress,
-                            )
-                        }
-                    })
-                    .await;
+                let result = download_task.await;
 
                 // Update UI when done and process next in queue
                 if let Some(this) = this.upgrade() {
                     let _ = cx.update_entity(&this, |this, cx| {
                         this.active_download = None;
 
-                        if let Err(e) = result {
-                            this.download_error = Some(format!(
-                                "Failed to download {}: {}",
-                                model.display_name(),
-                                e
-                            ));
+                        match result {
+                            Ok(Ok(_)) => {} // Success
+                            Ok(Err(e)) => {
+                                this.download_error = Some(format!(
+                                    "Failed to download {}: {}",
+                                    model.display_name(),
+                                    e
+                                ));
+                            }
+                            Err(e) => {
+                                this.download_error = Some(format!("Download task failed: {}", e));
+                            }
                         }
 
                         // Process next in queue
@@ -411,16 +415,6 @@ impl Adlib {
                 }
             }
         }));
-    }
-
-    /// Cancel the current download
-    fn cancel_download(&mut self, cx: &mut Context<Self>) {
-        if let Some((model, progress)) = self.active_download.take() {
-            progress.cancel();
-            self.download_error = Some(format!("{} download cancelled", model.display_name()));
-        }
-        // Process next in queue
-        self.process_download_queue(cx);
     }
 
     /// Check if a model is downloaded
@@ -923,36 +917,12 @@ impl Render for Adlib {
                                                     .gap_1()
                                                     .child(
                                                         div()
-                                                            .flex()
-                                                            .justify_between()
-                                                            .items_center()
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(rgb(0xcccccc))
-                                                                    .child(format!(
-                                                                        "Downloading {}",
-                                                                        model_name
-                                                                    )),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .id("cancel-download")
-                                                                    .text_xs()
-                                                                    .text_color(rgb(0xf44336))
-                                                                    .cursor_pointer()
-                                                                    .hover(|s| {
-                                                                        s.text_color(rgb(0xff6666))
-                                                                    })
-                                                                    .on_click(cx.listener(
-                                                                        |this, _, _w, cx| {
-                                                                            this.cancel_download(
-                                                                                cx,
-                                                                            );
-                                                                        },
-                                                                    ))
-                                                                    .child("Cancel"),
-                                                            ),
+                                                            .text_xs()
+                                                            .text_color(rgb(0xcccccc))
+                                                            .child(format!(
+                                                                "Downloading {}",
+                                                                model_name
+                                                            )),
                                                     )
                                                     .child(
                                                         // Progress bar
@@ -2596,6 +2566,16 @@ impl Adlib {
         let all_models: Vec<WhisperModel> = WhisperModel::recommended().to_vec();
         let has_downloaded = all_models.iter().any(|&m| self.is_model_downloaded(m));
 
+        // Get download progress info
+        let is_downloading = self.active_download.is_some();
+        let download_progress = self.active_download.as_ref().map(|(model, tracker)| {
+            let progress = tracker.get_progress();
+            let current_model = model.display_name();
+            let queued_count = self.download_queue.len();
+            (current_model, progress, queued_count)
+        });
+        let show_delete_confirmation = self.show_delete_all_confirmation;
+
         div()
             .flex()
             .flex_col()
@@ -2643,27 +2623,145 @@ impl Adlib {
                                     .text_color(rgb(0x666666))
                                     .child("Larger models are more accurate but slower"),
                             )
-                            // Delete All button (only show if any downloaded)
-                            .when(has_downloaded, |el| {
+                            // Download progress or Delete All button
+                            .when(is_downloading, |el| {
+                                if let Some((model_name, progress, queued)) = &download_progress {
+                                    let progress_pct = progress.progress * 100.0;
+                                    let downloaded_mb =
+                                        progress.downloaded_bytes as f64 / 1_000_000.0;
+                                    let total_mb = progress
+                                        .total_bytes
+                                        .map(|t| t as f64 / 1_000_000.0)
+                                        .unwrap_or(0.0);
+                                    let status_text = if *queued > 0 {
+                                        format!(
+                                            "Downloading {} ({:.0}%) +{} queued",
+                                            model_name, progress_pct, queued
+                                        )
+                                    } else {
+                                        format!(
+                                            "Downloading {} ({:.1}/{:.0} MB)",
+                                            model_name, downloaded_mb, total_mb
+                                        )
+                                    };
+                                    el.child(
+                                        div()
+                                            .mt_3()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x4CAF50))
+                                                    .child(status_text),
+                                            )
+                                            .child(
+                                                div()
+                                                    .h(px(6.0))
+                                                    .bg(rgb(0x2d2d44))
+                                                    .rounded_full()
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .bg(rgb(0x4CAF50))
+                                                            .rounded_full()
+                                                            .w(relative(progress.progress)),
+                                                    ),
+                                            ),
+                                    )
+                                } else {
+                                    el
+                                }
+                            })
+                            // Delete confirmation dialog
+                            .when(show_delete_confirmation && !is_downloading, |el| {
                                 el.child(
                                     div()
-                                        .id("delete-all-models")
-                                        .mt_2()
-                                        .px_3()
-                                        .py_2()
+                                        .mt_3()
+                                        .p_3()
+                                        .bg(rgb(0x3d1c1c))
                                         .rounded_md()
-                                        .bg(rgb(0x2d2d44))
-                                        .text_xs()
-                                        .text_color(rgb(0xf44336))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(rgb(0x3d3d54)))
-                                        .on_click(cx.listener(|this, _, _w, cx| {
-                                            this.delete_all_models();
-                                            cx.notify();
-                                        }))
-                                        .child("Delete All Models"),
+                                        .border_1()
+                                        .border_color(rgb(0xf44336))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0xf44336))
+                                                .child("Delete all downloaded models?"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .id("confirm-delete-all")
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .bg(rgb(0xf44336))
+                                                        .text_xs()
+                                                        .text_color(rgb(0xffffff))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.opacity(0.8))
+                                                        .on_click(cx.listener(|this, _, _w, cx| {
+                                                            this.delete_all_models();
+                                                            this.show_delete_all_confirmation =
+                                                                false;
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Yes, Delete All"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("cancel-delete-all")
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .bg(rgb(0x2d2d44))
+                                                        .text_xs()
+                                                        .text_color(rgb(0xcccccc))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.bg(rgb(0x3d3d54)))
+                                                        .on_click(cx.listener(|this, _, _w, cx| {
+                                                            this.show_delete_all_confirmation =
+                                                                false;
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Cancel"),
+                                                ),
+                                        ),
                                 )
-                            }),
+                            })
+                            // Delete All button (only show if any downloaded and not confirming)
+                            .when(
+                                has_downloaded && !is_downloading && !show_delete_confirmation,
+                                |el| {
+                                    el.child(
+                                        div()
+                                            .id("delete-all-models")
+                                            .mt_2()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(0x2d2d44))
+                                            .text_xs()
+                                            .text_color(rgb(0xf44336))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(0x3d3d54)))
+                                            .on_click(cx.listener(|this, _, _w, cx| {
+                                                this.show_delete_all_confirmation = true;
+                                                cx.notify();
+                                            }))
+                                            .child("Delete All Models"),
+                                    )
+                                },
+                            ),
                     ))
                     // Transcription Options
                     .child(settings_section(
