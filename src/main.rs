@@ -3,6 +3,7 @@
 //! This is the main entry point for the Adlib application.
 
 mod app;
+mod assets;
 mod audio;
 mod models;
 mod state;
@@ -10,11 +11,12 @@ mod transcription;
 mod whisper;
 
 use app::Adlib;
+use assets::Assets;
 use gpui::prelude::*;
 use gpui::*;
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {

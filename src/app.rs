@@ -9,6 +9,7 @@ use crate::transcription::{resample, LiveTranscriber, TranscriptionEngine, Trans
 use crate::whisper::{ModelManager, ProgressTracker, WhisperModel};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, *};
+use gpui_component::{Icon, Sizable};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -2426,18 +2427,18 @@ impl Adlib {
         }
     }
 
-    /// Render a downloaded model row with Select and Delete buttons
-    fn render_downloaded_model_row(
-        &self,
-        model: WhisperModel,
-        is_selected: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// Render a unified model row showing download/select/delete state
+    fn render_model_row(&self, model: WhisperModel, cx: &mut Context<Self>) -> impl IntoElement {
         let model_name = model.display_name();
         let short_name = model.short_name();
+        let is_downloaded = self.is_model_downloaded(model);
+        let is_selected =
+            is_downloaded && model.short_name() == self.state.settings.selected_model_name;
+        let is_downloading = self.is_model_downloading(model);
+        let is_queued = self.is_model_queued(model);
 
         div()
-            .id(SharedString::from(format!("model-dl-{}", short_name)))
+            .id(SharedString::from(format!("model-{}", short_name)))
             .flex()
             .items_center()
             .justify_between()
@@ -2455,184 +2456,129 @@ impl Adlib {
             } else {
                 rgb(0x2d2d44)
             })
-            // Model name
+            // Model name (left side)
             .child(
                 div()
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(0xffffff))
+                    .text_color(if is_downloaded {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x888888)
+                    })
                     .child(model_name),
             )
-            // Action buttons
+            // Action buttons (right side)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    // Select button (if not already selected)
-                    .when(!is_selected, |el| {
-                        el.child(
-                            div()
-                                .id(SharedString::from(format!("select-{}", short_name)))
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(rgb(0x4a9eff))
-                                .text_xs()
-                                .text_color(rgb(0xffffff))
-                                .cursor_pointer()
-                                .hover(|s| s.opacity(0.8))
-                                .on_click(cx.listener(move |this, _, _w, cx| {
-                                    this.select_model(model);
-                                    cx.notify();
-                                }))
-                                .child("Select"),
-                        )
-                    })
-                    // Selected indicator
-                    .when(is_selected, |el| {
-                        el.child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(rgb(0xe94560))
-                                .text_xs()
-                                .text_color(rgb(0xffffff))
-                                .child("Selected"),
-                        )
-                    })
-                    // Delete button
+                    // Select/Selected button
                     .child(
                         div()
-                            .id(SharedString::from(format!("delete-{}", short_name)))
+                            .id(SharedString::from(format!("select-{}", short_name)))
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(0x2d2d44))
                             .text_xs()
-                            .text_color(rgb(0xf44336))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x3d3d54)))
-                            .on_click(cx.listener(move |this, _, _w, cx| {
-                                this.delete_model(model);
-                                cx.notify();
-                            }))
-                            .child("Delete"),
+                            .when(is_selected, |el| {
+                                el.bg(rgb(0xe94560))
+                                    .text_color(rgb(0xffffff))
+                                    .child("Selected")
+                            })
+                            .when(!is_selected && is_downloaded, |el| {
+                                el.bg(rgb(0x4a9eff))
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.8))
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.select_model(model);
+                                        cx.notify();
+                                    }))
+                                    .child("Select")
+                            })
+                            .when(!is_selected && !is_downloaded, |el| {
+                                el.bg(rgb(0x2d2d44))
+                                    .text_color(rgb(0x666666))
+                                    .cursor_default()
+                                    .child("Select")
+                            }),
+                    )
+                    // Download/Delete/Downloading icon button
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("action-{}", short_name)))
+                            .w(px(32.0))
+                            .h(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            // Downloading state - circle-dot icon
+                            .when(is_downloading, |el| {
+                                el.bg(rgb(0xFF9800)).child(
+                                    Icon::default()
+                                        .path("icons/circle-dot.svg")
+                                        .small()
+                                        .text_color(rgb(0xffffff)),
+                                )
+                            })
+                            // Queued state - dashed circle
+                            .when(is_queued && !is_downloading, |el| {
+                                el.bg(rgb(0x2d2d44)).child(
+                                    Icon::default()
+                                        .path("icons/circle-dot-dashed.svg")
+                                        .small()
+                                        .text_color(rgb(0x888888)),
+                                )
+                            })
+                            // Download button (not downloaded, not queued)
+                            .when(!is_downloaded && !is_downloading && !is_queued, |el| {
+                                el.bg(rgb(0x4CAF50))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.8))
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.queue_model_download(model, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        Icon::default()
+                                            .path("icons/download.svg")
+                                            .small()
+                                            .text_color(rgb(0xffffff)),
+                                    )
+                            })
+                            // Delete button (downloaded)
+                            .when(is_downloaded, |el| {
+                                el.bg(rgb(0x2d2d44))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x3d3d54)))
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.delete_model(model);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        Icon::default()
+                                            .path("icons/trash.svg")
+                                            .small()
+                                            .text_color(rgb(0xf44336)),
+                                    )
+                            }),
                     ),
             )
     }
 
-    /// Render an available (not downloaded) model row with Download button
-    fn render_available_model_row(
-        &self,
-        model: WhisperModel,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let model_name = model.display_name();
-        let short_name = model.short_name();
-        let is_downloading = self.is_model_downloading(model);
-        let is_queued = self.is_model_queued(model);
-
-        div()
-            .id(SharedString::from(format!("model-av-{}", short_name)))
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_4()
-            .py_3()
-            .rounded_lg()
-            .bg(rgb(0x1a1a2e))
-            .border_1()
-            .border_color(rgb(0x2d2d44))
-            // Model name
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(0x888888))
-                    .child(model_name),
-            )
-            // Action button
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    // Downloading indicator
-                    .when(is_downloading, |el| {
-                        el.child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(rgb(0xFF9800))
-                                .text_xs()
-                                .text_color(rgb(0xffffff))
-                                .child("Downloading..."),
-                        )
-                    })
-                    // Queued indicator
-                    .when(is_queued && !is_downloading, |el| {
-                        el.child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(rgb(0x2d2d44))
-                                .text_xs()
-                                .text_color(rgb(0x888888))
-                                .child("Queued"),
-                        )
-                    })
-                    // Download button
-                    .when(!is_downloading && !is_queued, |el| {
-                        el.child(
-                            div()
-                                .id(SharedString::from(format!("download-{}", short_name)))
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(rgb(0x4CAF50))
-                                .text_xs()
-                                .text_color(rgb(0xffffff))
-                                .cursor_pointer()
-                                .hover(|s| s.opacity(0.8))
-                                .on_click(cx.listener(move |this, _, _w, cx| {
-                                    this.queue_model_download(model, cx);
-                                    cx.notify();
-                                }))
-                                .child("Download"),
-                        )
-                    }),
-            )
-    }
-
     fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected_model = self.state.settings.selected_model_name.clone();
         let is_vad = self.state.settings.is_vad_enabled;
         let is_gpu = self.state.settings.is_using_gpu;
         let is_live = self.state.settings.is_live_transcription_enabled;
         let should_translate = self.state.settings.parameters.should_translate;
         let language = self.state.settings.parameters.language.clone();
 
-        // Separate downloaded and available models
-        let downloaded_models: Vec<(WhisperModel, bool)> = WhisperModel::recommended()
-            .iter()
-            .filter(|&&model| self.is_model_downloaded(model))
-            .map(|&model| {
-                let is_selected = model.short_name() == selected_model;
-                (model, is_selected)
-            })
-            .collect();
-
-        let available_models: Vec<WhisperModel> = WhisperModel::recommended()
-            .iter()
-            .filter(|&&model| !self.is_model_downloaded(model))
-            .copied()
-            .collect();
-
-        let has_downloaded = !downloaded_models.is_empty();
+        // Get all recommended models
+        let all_models: Vec<WhisperModel> = WhisperModel::recommended().to_vec();
+        let has_downloaded = all_models.iter().any(|&m| self.is_model_downloaded(m));
 
         div()
             .flex()
@@ -2662,21 +2608,28 @@ impl Adlib {
                     .p_6()
                     .flex_grow()
                     .overflow_y_scroll()
-                    // Downloaded Models Section
-                    .when(has_downloaded, |el| {
-                        el.child(settings_section(
-                            "Downloaded Models",
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .children(downloaded_models.into_iter().map(
-                                    |(model, is_selected)| {
-                                        self.render_downloaded_model_row(model, is_selected, cx)
-                                    },
-                                ))
-                                .child(
-                                    // Delete All button
+                    // Whisper Models Section (unified list)
+                    .child(settings_section(
+                        "Whisper Models",
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(
+                                all_models
+                                    .into_iter()
+                                    .map(|model| self.render_model_row(model, cx)),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .text_xs()
+                                    .text_color(rgb(0x666666))
+                                    .child("Larger models are more accurate but slower"),
+                            )
+                            // Delete All button (only show if any downloaded)
+                            .when(has_downloaded, |el| {
+                                el.child(
                                     div()
                                         .id("delete-all-models")
                                         .mt_2()
@@ -2693,38 +2646,8 @@ impl Adlib {
                                             cx.notify();
                                         }))
                                         .child("Delete All Models"),
-                                ),
-                        ))
-                    })
-                    // Available Models Section
-                    .child(settings_section(
-                        "Available Models",
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .when(available_models.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0x888888))
-                                        .child("All models downloaded"),
                                 )
-                            })
-                            .when(!available_models.is_empty(), |el| {
-                                el.children(
-                                    available_models
-                                        .into_iter()
-                                        .map(|model| self.render_available_model_row(model, cx)),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .text_xs()
-                                    .text_color(rgb(0x666666))
-                                    .child("Larger models are more accurate but slower"),
-                            ),
+                            }),
                     ))
                     // Transcription Options
                     .child(settings_section(
