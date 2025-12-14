@@ -1,0 +1,16 @@
+[package]
+name = "adlib"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A Linux desktop voice recorder and transcription application"
+authors = ["Adlib Contributors"]
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", features = ["serde"] }
+dirs = "6.0.0"
+gpui = "0.2.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
