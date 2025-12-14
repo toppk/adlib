@@ -3,7 +3,7 @@
 use crate::audio::{AudioCapture, AudioPlayer, CaptureState, SharedCaptureState, SharedPlaybackState, WavRecorder};
 use crate::models::{RecordingInfo, Segment, Transcription, TranscriptionStatus};
 use crate::state::{ActiveView, AppState, RecordingsDatabase};
-use crate::transcription::{TranscriptionEngine, TranscriptionOptions};
+use crate::transcription::{resample, LiveTranscriber, TranscriptionEngine, TranscriptionOptions};
 use crate::whisper::{ModelManager, ProgressTracker, WhisperModel};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, *};
@@ -36,6 +36,21 @@ pub struct Adlib {
     /// Transcription status message
     transcription_status: Option<String>,
     _ui_refresh_task: Option<Task<()>>,
+    // Live transcription state
+    /// Live transcriber instance (loaded when entering Live mode)
+    live_transcriber: Option<Arc<Mutex<LiveTranscriber>>>,
+    /// Accumulated live transcript text
+    live_transcript: String,
+    /// Is live transcription currently running
+    live_is_running: bool,
+    /// Audio capture specifically for live mode (separate from recording)
+    live_audio_capture: Option<AudioCapture>,
+    /// Shared capture state for live mode
+    live_capture_state: Option<SharedCaptureState>,
+    /// Live duration in seconds
+    live_duration: f64,
+    /// Live transcription error (if any)
+    live_error: Option<String>,
 }
 
 impl Adlib {
@@ -83,6 +98,14 @@ impl Adlib {
             transcribing_file: None,
             transcription_status: None,
             _ui_refresh_task: None,
+            // Live transcription state
+            live_transcriber: None,
+            live_transcript: String::new(),
+            live_is_running: false,
+            live_audio_capture: None,
+            live_capture_state: None,
+            live_duration: 0.0,
+            live_error: None,
         }
     }
 
@@ -583,6 +606,7 @@ impl Render for Adlib {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_view = self.state.active_view.clone();
         let show_help = self.state.show_help;
+        let is_live = matches!(active_view, ActiveView::Live);
         let is_record = matches!(active_view, ActiveView::Record);
         let is_list = matches!(active_view, ActiveView::RecordingList);
         let is_settings = matches!(active_view, ActiveView::Settings);
@@ -763,6 +787,21 @@ impl Render for Adlib {
                             .flex_grow()
                             .child(
                                 div()
+                                    .id("nav-live")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(if is_live { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
+                                    .text_color(if is_live { rgb(0xe94560) } else { rgb(0xcccccc) })
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x2d2d44)))
+                                    .on_click(cx.listener(|this, _, _w, _cx| {
+                                        this.state.navigate_to(ActiveView::Live);
+                                    }))
+                                    .child("Live"),
+                            )
+                            .child(
+                                div()
                                     .id("nav-record")
                                     .px_3()
                                     .py_2()
@@ -907,6 +946,9 @@ impl Render for Adlib {
                     .h_full()
                     .relative()
                     .child(match &active_view {
+                        ActiveView::Live => {
+                            self.render_live_view(cx).into_any_element()
+                        }
                         ActiveView::Record => {
                             self.render_record_view(cx).into_any_element()
                         }
@@ -928,6 +970,573 @@ impl Render for Adlib {
 }
 
 impl Adlib {
+    /// Start live transcription
+    fn start_live_transcription(&mut self, cx: &mut Context<Self>) {
+        // Check if a model is available
+        let model_path = {
+            let manager = self.model_manager.lock().unwrap();
+            // Try to find any downloaded model, preferring the selected one
+            let selected = WhisperModel::from_short_name(&self.state.settings.selected_model_name)
+                .unwrap_or(WhisperModel::Tiny);
+            if let Some(path) = manager.get_cached_model_path(selected) {
+                Some(path)
+            } else {
+                // Try to find any downloaded model
+                WhisperModel::all()
+                    .iter()
+                    .find_map(|&m| manager.get_cached_model_path(m))
+            }
+        };
+
+        let Some(model_path) = model_path else {
+            self.live_error = Some("No model downloaded. Go to Settings to download a model.".to_string());
+            return;
+        };
+
+        // Create the live transcriber
+        match LiveTranscriber::new(&model_path) {
+            Ok(transcriber) => {
+                self.live_transcriber = Some(Arc::new(Mutex::new(transcriber)));
+                self.live_error = None;
+            }
+            Err(e) => {
+                self.live_error = Some(format!("Failed to load model: {}", e));
+                return;
+            }
+        }
+
+        // Create a new audio capture for live mode
+        let mut live_capture = AudioCapture::new();
+        let live_state = live_capture.shared_state();
+
+        if let Err(e) = live_capture.start() {
+            self.live_error = Some(format!("Failed to start audio: {}", e));
+            self.live_transcriber = None;
+            return;
+        }
+
+        self.live_capture_state = Some(live_state.clone());
+        self.live_audio_capture = Some(live_capture);
+        self.live_is_running = true;
+        self.live_duration = 0.0;
+        self.live_transcript.clear();
+
+        // Start UI refresh task for smooth waveform (60fps like Record mode)
+        let ui_capture_state = live_state.clone();
+        self._ui_refresh_task = Some(cx.spawn({
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    // Check if still running
+                    let should_stop = this.update(cx, |this, _| {
+                        !this.live_is_running
+                    }).unwrap_or(true);
+
+                    if should_stop || ui_capture_state.state() != CaptureState::Capturing {
+                        break;
+                    }
+
+                    // Wait ~60fps refresh rate
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+
+                    // Notify to refresh the UI (waveform)
+                    let Some(this) = this.upgrade() else {
+                        break;
+                    };
+                    let result = cx.update_entity(&this, |_, cx| {
+                        cx.notify();
+                    });
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+        }));
+
+        // Start a task to process audio and update transcription
+        let transcriber = self.live_transcriber.clone().unwrap();
+        let capture_state = live_state;
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut last_sample_count = 0usize;
+
+            loop {
+                // Sleep for a bit to accumulate audio
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+
+                // Check if we should stop
+                let should_stop = this.update(cx, |this, _| {
+                    !this.live_is_running
+                }).unwrap_or(true);
+
+                if should_stop {
+                    break;
+                }
+
+                // Get new samples from capture
+                let samples = capture_state.samples();
+                let duration = capture_state.duration();
+
+                // Update duration
+                let _ = this.update(cx, |this, _| {
+                    this.live_duration = duration;
+                });
+
+                // Check if we have new samples to process
+                if samples.len() > last_sample_count {
+                    let new_samples = &samples[last_sample_count..];
+                    last_sample_count = samples.len();
+
+                    // Get the sample rate from capture and resample to 16kHz if needed
+                    let sample_rate = capture_state.sample_rate();
+                    let samples_16k = if sample_rate != 16000 {
+                        // PipeWire typically captures at 48kHz - resample to 16kHz for Whisper
+                        resample(new_samples, sample_rate, 16000)
+                    } else {
+                        new_samples.to_vec()
+                    };
+
+                    // Add resampled samples to transcriber
+                    {
+                        let mut t = transcriber.lock().unwrap();
+                        t.add_samples(&samples_16k);
+                    }
+
+                    // Check if ready to process
+                    let ready = {
+                        let t = transcriber.lock().unwrap();
+                        t.ready_to_process()
+                    };
+
+                    if ready {
+                        // Process in background
+                        let result = {
+                            let mut t = transcriber.lock().unwrap();
+                            t.process()
+                        };
+
+                        match result {
+                            Ok(true) => {
+                                // Update the transcript in UI
+                                let full_transcript = {
+                                    let t = transcriber.lock().unwrap();
+                                    t.get_transcript()
+                                };
+
+                                let _ = this.update(cx, |this, cx| {
+                                    this.live_transcript = full_transcript;
+                                    cx.notify();
+                                });
+                            }
+                            Ok(false) => {
+                                // No new text from processing, but still update
+                                // in case text was committed during silence
+                                let full_transcript = {
+                                    let t = transcriber.lock().unwrap();
+                                    t.get_transcript()
+                                };
+
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.live_transcript != full_transcript {
+                                        this.live_transcript = full_transcript;
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                let _ = this.update(cx, |this, cx| {
+                                    this.live_error = Some(format!("Transcription error: {}", e));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Notify UI to update
+                let _ = this.update(cx, |_, cx| {
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Stop live transcription
+    fn stop_live_transcription(&mut self) {
+        self.live_is_running = false;
+
+        // Stop audio capture
+        if let Some(mut capture) = self.live_audio_capture.take() {
+            let _ = capture.stop();
+        }
+
+        self.live_capture_state = None;
+        // Keep transcriber and transcript for viewing/copying
+    }
+
+    /// Clear live transcript
+    fn clear_live_transcript(&mut self) {
+        self.live_transcript.clear();
+        if let Some(transcriber) = &self.live_transcriber {
+            let mut t = transcriber.lock().unwrap();
+            t.clear();
+        }
+        self.live_duration = 0.0;
+    }
+
+    /// Copy live transcript to clipboard
+    fn copy_live_transcript(&self, cx: &mut Context<Self>) {
+        if !self.live_transcript.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.live_transcript.clone()));
+        }
+    }
+
+    fn render_live_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_running = self.live_is_running;
+        let transcript = self.live_transcript.clone();
+        let duration = self.live_duration;
+        let error = self.live_error.clone();
+
+        // Get waveform from live capture if running
+        let waveform_samples = self.live_capture_state
+            .as_ref()
+            .map(|s| s.waveform_samples())
+            .unwrap_or_default();
+        let _volume_level = self.live_capture_state
+            .as_ref()
+            .map(|s| s.volume_level())
+            .unwrap_or(0.0);
+
+        // Get calibration status
+        let (is_calibrating, calibration_progress) = self.live_transcriber
+            .as_ref()
+            .map(|t| {
+                let t = t.lock().unwrap();
+                (!t.is_calibrated(), t.calibration_progress())
+            })
+            .unwrap_or((false, 0.0));
+
+        // Check if a model is available
+        let has_model = {
+            let manager = self.model_manager.lock().unwrap();
+            WhisperModel::all()
+                .iter()
+                .any(|&m| manager.is_model_downloaded(m))
+        };
+
+        let format_duration = |secs: f64| {
+            let total_seconds = secs as u64;
+            let minutes = total_seconds / 60;
+            let seconds = total_seconds % 60;
+            format!("{:02}:{:02}", minutes, seconds)
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(0x16213e))
+            .child(
+                // Header
+                div()
+                    .px_6()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(rgb(0x2d2d44))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(if is_calibrating && is_running {
+                                "Calibrating..."
+                            } else if is_running {
+                                "Live Transcription..."
+                            } else {
+                                "Live Transcription"
+                            }),
+                    )
+                    // Calibration progress bar
+                    .when(is_calibrating && is_running, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xffa500))
+                                        .child("Stay quiet..."),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(100.0))
+                                        .h(px(8.0))
+                                        .bg(rgb(0x2d2d44))
+                                        .rounded_full()
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .rounded_full()
+                                                .bg(rgb(0xffa500))
+                                                .w(relative(calibration_progress)),
+                                        ),
+                                ),
+                        )
+                    }),
+            )
+            // Error message
+            .when(error.is_some(), |el| {
+                let err = error.clone().unwrap_or_default();
+                el.child(
+                    div()
+                        .px_6()
+                        .py_2()
+                        .bg(rgb(0x4a1c1c))
+                        .text_color(rgb(0xf44336))
+                        .text_sm()
+                        .child(err),
+                )
+            })
+            // No model warning
+            .when(!has_model && !is_running, |el| {
+                el.child(
+                    div()
+                        .px_6()
+                        .py_4()
+                        .child(
+                            div()
+                                .p_4()
+                                .bg(rgb(0x2d2d44))
+                                .rounded_lg()
+                                .text_color(rgb(0xffa500))
+                                .text_sm()
+                                .child("No model downloaded. Go to Settings to download a Whisper model first."),
+                        ),
+                )
+            })
+            // Waveform display
+            .child(
+                div()
+                    .px_6()
+                    .py_4()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(400.0))
+                            .h(px(100.0))
+                            .bg(rgb(0x1a1a2e))
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(0x2d2d44))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(!is_running, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(rgb(0x666666))
+                                        .text_sm()
+                                        .child("Press Start to begin live transcription"),
+                                )
+                            })
+                            .when(is_running, |el| {
+                                // Show waveform bars - fixed 48 bars like Record view
+                                let num_bars = 48usize;
+                                let num_samples = waveform_samples.len();
+
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_end()
+                                        .justify_center()
+                                        .gap_1()
+                                        .h(px(60.0))
+                                        .children((0..num_bars).map(move |i| {
+                                            let height = if num_samples > 0 {
+                                                // Calculate which bars have data (fill from right)
+                                                let bars_with_data = num_samples.min(num_bars);
+                                                let first_bar_with_data = num_bars - bars_with_data;
+
+                                                if i >= first_bar_with_data {
+                                                    // This bar has data
+                                                    let samples_to_skip = num_samples.saturating_sub(num_bars);
+                                                    let bar_offset = i - first_bar_with_data;
+                                                    let sample_idx = samples_to_skip + bar_offset;
+                                                    let sample = waveform_samples.get(sample_idx).copied().unwrap_or(0.0);
+                                                    (sample * 200.0).clamp(2.0, 60.0)
+                                                } else {
+                                                    // No data yet - minimal height
+                                                    2.0
+                                                }
+                                            } else {
+                                                2.0
+                                            };
+                                            div()
+                                                .w(px(4.0))
+                                                .h(px(height))
+                                                .bg(rgb(0xe94560))
+                                                .rounded_sm()
+                                        })),
+                                )
+                            }),
+                    ),
+            )
+            // Transcript area
+            .child(
+                div()
+                    .id("live-transcript-scroll")
+                    .flex_grow()
+                    .px_6()
+                    .py_4()
+                    .overflow_y_scroll()
+                    .overflow_x_hidden()
+                    .child(
+                        div()
+                            .p_4()
+                            .bg(rgb(0x1a1a2e))
+                            .rounded_lg()
+                            .min_h(px(200.0))
+                            .w_full()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(0x888888))
+                                    .mb_2()
+                                    .child("Transcript"),
+                            )
+                            .child(
+                                div()
+                                    .text_base()
+                                    .text_color(rgb(0xcccccc))
+                                    .child(if transcript.is_empty() {
+                                        if is_running {
+                                            "Listening...".to_string()
+                                        } else {
+                                            "Transcript will appear here".to_string()
+                                        }
+                                    } else {
+                                        // Insert newlines at word boundaries for wrapping
+                                        // (~10 words per line for readable text)
+                                        let words: Vec<&str> = transcript.split_whitespace().collect();
+                                        let mut lines = Vec::new();
+                                        let mut current_line = Vec::new();
+                                        for word in words {
+                                            current_line.push(word);
+                                            if current_line.len() >= 10 {
+                                                lines.push(current_line.join(" "));
+                                                current_line = Vec::new();
+                                            }
+                                        }
+                                        if !current_line.is_empty() {
+                                            lines.push(current_line.join(" "));
+                                        }
+                                        lines.join("\n")
+                                    }),
+                            ),
+                    ),
+            )
+            // Controls
+            .child(
+                div()
+                    .px_6()
+                    .py_4()
+                    .border_t_1()
+                    .border_color(rgb(0x2d2d44))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        // Buttons
+                        div()
+                            .flex()
+                            .gap_3()
+                            // Start/Stop button
+                            .child(
+                                div()
+                                    .id("live-toggle")
+                                    .px_6()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .bg(if is_running { rgb(0xf44336) } else { rgb(0x4caf50) })
+                                    .hover(|s| s.bg(if is_running { rgb(0xd32f2f) } else { rgb(0x45a049) }))
+                                    .text_color(rgb(0xffffff))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .when(!has_model && !is_running, |el| {
+                                        el.opacity(0.5).cursor_default()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        if this.live_is_running {
+                                            this.stop_live_transcription();
+                                        } else if has_model {
+                                            this.start_live_transcription(cx);
+                                        }
+                                    }))
+                                    .child(if is_running { "Stop" } else { "Start" }),
+                            )
+                            // Copy button
+                            .child(
+                                div()
+                                    .id("live-copy")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .bg(rgb(0x2d2d44))
+                                    .hover(|s| s.bg(rgb(0x3d3d54)))
+                                    .text_color(rgb(0xcccccc))
+                                    .when(transcript.is_empty(), |el| {
+                                        el.opacity(0.5).cursor_default()
+                                    })
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.copy_live_transcript(cx);
+                                    }))
+                                    .child("Copy"),
+                            )
+                            // Clear button
+                            .child(
+                                div()
+                                    .id("live-clear")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .bg(rgb(0x2d2d44))
+                                    .hover(|s| s.bg(rgb(0x3d3d54)))
+                                    .text_color(rgb(0xcccccc))
+                                    .when(transcript.is_empty() && !is_running, |el| {
+                                        el.opacity(0.5).cursor_default()
+                                    })
+                                    .on_click(cx.listener(|this, _, _w, _cx| {
+                                        this.stop_live_transcription();
+                                        this.clear_live_transcript();
+                                    }))
+                                    .child("Clear"),
+                            ),
+                    )
+                    // Duration display
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if is_running { rgb(0xe94560) } else { rgb(0x666666) })
+                            .child(format_duration(duration)),
+                    ),
+            )
+    }
+
     fn render_record_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_recording = self.state.record_screen.is_recording;
         let is_paused = self.state.record_screen.is_paused;

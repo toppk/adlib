@@ -4,6 +4,7 @@ use uuid::Uuid;
 /// The currently active view/screen
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ActiveView {
+    Live, // Live transcription (no save)
     #[default]
     Record,
     RecordingList,
