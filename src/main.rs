@@ -17,13 +17,10 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Adlib - Voice Recorder".into()),
-                    appears_transparent: false,
-                    ..Default::default()
-                }),
-                // Use server-side decorations for native window controls (close, minimize, etc.)
-                window_decorations: Some(WindowDecorations::Server),
+                // No titlebar - we'll draw our own
+                titlebar: None,
+                // Use client-side decorations so we can draw our own titlebar
+                window_decorations: Some(WindowDecorations::Client),
                 // App ID for Wayland/GNOME desktop integration - matches .desktop file
                 app_id: Some("com.adlib.VoiceRecorder".to_string()),
                 ..Default::default()

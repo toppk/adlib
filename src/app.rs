@@ -1,20 +1,236 @@
 //! Main application component for Adlib
 
-use crate::state::{ActiveView, AppState};
+use crate::audio::{AudioCapture, AudioPlayer, CaptureState, SharedCaptureState, SharedPlaybackState, WavRecorder};
+use crate::models::RecordingInfo;
+use crate::state::{ActiveView, AppState, RecordingsDatabase};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, *};
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// The root application view
 pub struct Adlib {
     state: AppState,
+    database: RecordingsDatabase,
+    audio_capture: AudioCapture,
+    capture_state: SharedCaptureState,
+    audio_player: AudioPlayer,
+    playback_state: SharedPlaybackState,
+    /// Currently loaded recording path for playback
+    loaded_recording_path: Option<PathBuf>,
+    /// Error message from last load attempt
+    load_error: Option<String>,
+    _ui_refresh_task: Option<Task<()>>,
 }
 
 impl Adlib {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         let mut state = AppState::new();
-        // Add demo recordings for UI development
-        state.add_demo_recordings();
-        Self { state }
+        let database = RecordingsDatabase::new();
+
+        // Load recordings from database (creates with demos on first run)
+        match database.load() {
+            Ok(recordings) => {
+                state.recordings = recordings;
+            }
+            Err(e) => {
+                eprintln!("Failed to load recordings database: {}", e);
+            }
+        }
+
+        let audio_capture = AudioCapture::new();
+        let capture_state = audio_capture.shared_state();
+        let audio_player = AudioPlayer::new();
+        let playback_state = audio_player.shared_state();
+
+        Self {
+            state,
+            database,
+            audio_capture,
+            capture_state,
+            audio_player,
+            playback_state,
+            loaded_recording_path: None,
+            load_error: None,
+            _ui_refresh_task: None,
+        }
+    }
+
+    /// Start audio recording with UI refresh
+    fn start_audio_capture(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.audio_capture.start() {
+            eprintln!("Failed to start audio capture: {}", e);
+            return;
+        }
+
+        // Spawn a task to refresh UI during recording
+        let capture_state = self.capture_state.clone();
+        self._ui_refresh_task = Some(cx.spawn({
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    // Check if still capturing
+                    if capture_state.state() != CaptureState::Capturing {
+                        break;
+                    }
+
+                    // Wait ~60fps refresh rate
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+
+                    // Upgrade weak reference and notify to refresh the UI
+                    let Some(this) = this.upgrade() else {
+                        break;
+                    };
+                    let result = cx.update_entity(&this, |_, cx| {
+                        cx.notify();
+                    });
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
+    /// Stop audio recording and save to file
+    fn stop_audio_capture(&mut self) -> Option<std::path::PathBuf> {
+        // Get the actual sample rate before stopping (it resets on stop)
+        let sample_rate = self.capture_state.sample_rate();
+
+        match self.audio_capture.stop() {
+            Ok(samples) => {
+                if samples.is_empty() {
+                    return None;
+                }
+                // Use the actual capture sample rate for the WAV file
+                let recorder = WavRecorder::new().with_sample_rate(sample_rate);
+                match recorder.save(&samples, None) {
+                    Ok(path) => {
+                        println!(
+                            "Recording saved to: {:?} ({}Hz, {} samples)",
+                            path,
+                            sample_rate,
+                            samples.len()
+                        );
+                        Some(path)
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to save recording: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to stop audio capture: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Get the path for a recording file
+    fn recording_path(&self, file_name: &str) -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("adlib")
+            .join("recordings")
+            .join(file_name)
+    }
+
+    /// Check if a recording file exists
+    fn recording_exists(&self, file_name: &str) -> bool {
+        self.recording_path(file_name).exists()
+    }
+
+    /// Load a recording for playback
+    fn load_recording(&mut self, file_name: &str) -> Result<(), String> {
+        let path = self.recording_path(file_name);
+
+        // Check if file exists first
+        if !path.exists() {
+            let err = format!("File not found: {}", file_name);
+            self.load_error = Some(err.clone());
+            return Err(err);
+        }
+
+        // Load the WAV file
+        let (samples, sample_rate) = WavRecorder::load(&path)
+            .map_err(|e| {
+                let err = format!("{} (path: {:?})", e, path);
+                self.load_error = Some(err.clone());
+                err
+            })?;
+
+        // Load into the player
+        self.audio_player.load(samples, sample_rate);
+        self.loaded_recording_path = Some(path);
+        self.load_error = None;
+
+        Ok(())
+    }
+
+    /// Start playback with UI refresh
+    fn start_playback(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.audio_player.play() {
+            eprintln!("Failed to start playback: {}", e);
+            return;
+        }
+
+        // Spawn a task to refresh UI during playback
+        let playback_state = self.playback_state.clone();
+        self._ui_refresh_task = Some(cx.spawn({
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    // Check if still playing
+                    if !playback_state.is_playing() {
+                        break;
+                    }
+
+                    // Wait ~60fps refresh rate
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+
+                    // Upgrade weak reference and notify to refresh the UI
+                    let Some(this) = this.upgrade() else {
+                        break;
+                    };
+                    let result = cx.update_entity(&this, |_, cx| {
+                        cx.notify();
+                    });
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
+    /// Stop playback
+    fn stop_playback(&mut self) {
+        self.audio_player.stop();
+    }
+
+    /// Toggle playback (play/pause)
+    fn toggle_playback(&mut self, cx: &mut Context<Self>) {
+        if self.playback_state.is_playing() {
+            self.stop_playback();
+        } else {
+            self.start_playback(cx);
+        }
+    }
+
+    /// Save current recordings to the database
+    fn save_recordings_to_db(&self) {
+        if let Err(e) = self.database.save(&self.state.recordings) {
+            eprintln!("Failed to save recordings database: {}", e);
+        }
+    }
+
+    /// Add a new recording and save to database
+    fn add_recording(&mut self, recording: RecordingInfo) {
+        self.state.recordings.insert(0, recording);
+        self.save_recordings_to_db();
     }
 }
 
@@ -29,9 +245,10 @@ impl Render for Adlib {
         div()
             .size_full()
             .flex()
+            .flex_col()
             .bg(rgb(0x0f0f1a))
             .key_context("Adlib")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, _cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _cx| {
                 match event.keystroke.key.as_str() {
                     "f1" => {
                         this.state.toggle_help();
@@ -45,9 +262,15 @@ impl Render for Adlib {
                     }
                     "space" if !this.state.show_help => {
                         if this.state.record_screen.is_recording {
-                            this.state.stop_recording();
+                            let saved_path = this.stop_audio_capture();
+                            let file_name = saved_path.and_then(|p| {
+                                p.file_name().map(|f| f.to_string_lossy().to_string())
+                            });
+                            this.state.stop_recording(file_name);
+                            this.save_recordings_to_db();
                         } else {
                             this.state.start_recording();
+                            this.start_audio_capture(_cx);
                         }
                     }
                     "1" if event.keystroke.modifiers.control => {
@@ -59,23 +282,108 @@ impl Render for Adlib {
                     "3" if event.keystroke.modifiers.control => {
                         this.state.navigate_to(ActiveView::Settings);
                     }
+                    "q" if event.keystroke.modifiers.control => {
+                        // If recording, save first before closing
+                        if this.state.record_screen.is_recording {
+                            let saved_path = this.stop_audio_capture();
+                            let file_name = saved_path.and_then(|p| {
+                                p.file_name().map(|f| f.to_string_lossy().to_string())
+                            });
+                            this.state.stop_recording(file_name);
+                            this.save_recordings_to_db();
+                        }
+                        window.remove_window();
+                    }
                     _ => {}
                 }
             }))
-            // Sidebar
+            // Custom titlebar
+            .child(
+                div()
+                    .id("titlebar")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .h(px(36.0))
+                    .bg(rgb(0x12121f))
+                    .border_b_1()
+                    .border_color(rgb(0x2d2d44))
+                    .child(
+                        // Window title (left side) - draggable area
+                        div()
+                            .id("titlebar-drag-area")
+                            .flex()
+                            .flex_grow()
+                            .items_center()
+                            .h_full()
+                            .gap_2()
+                            .px_4()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_this, _event: &MouseDownEvent, window, _cx| {
+                                    window.start_window_move();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0xcccccc))
+                                    .child("Adlib - Voice Recorder"),
+                            ),
+                    )
+                    .child(
+                        // Close button (right side) - NOT draggable
+                        div()
+                            .id("close-button")
+                            .w(px(46.0))
+                            .h(px(36.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0xe81123)))
+                            .on_click(cx.listener(|this, _, window, _cx| {
+                                // If recording, save first before closing
+                                if this.state.record_screen.is_recording {
+                                    let saved_path = this.stop_audio_capture();
+                                    let file_name = saved_path.and_then(|p| {
+                                        p.file_name().map(|f| f.to_string_lossy().to_string())
+                                    });
+                                    this.state.stop_recording(file_name);
+                                    this.save_recordings_to_db();
+                                }
+                                window.remove_window();
+                            }))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .text_color(rgb(0xcccccc))
+                                    .child("×"),
+                            ),
+                    ),
+            )
+            // Main content area (sidebar + content)
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .w(px(200.0))
-                    .h_full()
-                    .bg(rgb(0x1a1a2e))
-                    .border_r_1()
-                    .border_color(rgb(0x2d2d44))
+                    .flex_grow()
+                    .overflow_hidden()
+                    // Sidebar
                     .child(
-                        // App title
                         div()
-                            .px_4()
+                            .flex()
+                            .flex_col()
+                            .w(px(200.0))
+                            .h_full()
+                            .bg(rgb(0x1a1a2e))
+                            .border_r_1()
+                            .border_color(rgb(0x2d2d44))
+                            .child(
+                                // App title
+                                div()
+                                    .px_4()
                             .py_3()
                             .border_b_1()
                             .border_color(rgb(0x2d2d44))
@@ -179,7 +487,8 @@ impl Render for Adlib {
                         }
                     })
                     .when(show_help, |el| el.child(render_help_overlay())),
-            )
+            ),
+        )
     }
 }
 
@@ -187,7 +496,17 @@ impl Adlib {
     fn render_record_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_recording = self.state.record_screen.is_recording;
         let is_paused = self.state.record_screen.is_paused;
-        let duration = self.state.record_screen.duration_seconds;
+
+        // Use live duration from audio capture when recording, otherwise use state
+        let duration = if is_recording && !is_paused {
+            self.capture_state.duration()
+        } else {
+            self.state.record_screen.duration_seconds
+        };
+
+        // Get live waveform samples from PipeWire capture
+        let waveform_samples = self.capture_state.waveform_samples();
+        let volume_level = self.capture_state.volume_level();
 
         let format_duration = |secs: f64| {
             let total_seconds = secs as u64;
@@ -253,7 +572,12 @@ impl Adlib {
                                 )
                             })
                             .when(is_recording, |el| {
-                                // Volume meter bars
+                                // Volume meter bars - driven by live PipeWire audio
+                                // Discrete updates: bars shift left when new sample arrives
+                                // Bars fill from right to left (newest on right)
+                                let num_bars = 48usize;
+                                let num_samples = waveform_samples.len();
+
                                 el.child(
                                     div()
                                         .flex()
@@ -261,29 +585,40 @@ impl Adlib {
                                         .justify_center()
                                         .gap_1()
                                         .h(px(60.0))
-                                        .children((0..32).map(|i| {
-                                            // Create animated bars - simulated waveform
-                                            // In a real implementation, these would be driven by audio samples
+                                        .children((0..num_bars).map(|i| {
                                             let height = if is_paused {
                                                 5.0
+                                            } else if num_samples > 0 {
+                                                // Calculate which bars have data (fill from right)
+                                                let bars_with_data = num_samples.min(num_bars);
+                                                let first_bar_with_data = num_bars - bars_with_data;
+
+                                                if i >= first_bar_with_data {
+                                                    // This bar has data
+                                                    let samples_to_skip = num_samples.saturating_sub(num_bars);
+                                                    let bar_offset = i - first_bar_with_data;
+                                                    let sample_idx = samples_to_skip + bar_offset;
+                                                    let sample = waveform_samples.get(sample_idx).copied().unwrap_or(0.0);
+                                                    (sample * 200.0).clamp(5.0, 60.0)
+                                                } else {
+                                                    // No data yet - minimal height
+                                                    5.0
+                                                }
                                             } else {
-                                                // Simulate varying heights based on position
-                                                let base = ((i as f32 - 16.0).abs() / 16.0) * 40.0;
-                                                let variation = ((i * 7) % 20) as f32;
-                                                (60.0 - base + variation).max(5.0)
+                                                (volume_level * 200.0).clamp(5.0, 60.0)
                                             };
                                             div()
-                                                .w(px(8.0))
+                                                .w(px(4.0))
                                                 .h(px(height))
                                                 .rounded_sm()
                                                 .bg(if is_paused {
                                                     rgb(0x444444)
-                                                } else if height > 45.0 {
-                                                    rgb(0xe94560) // High level - red
-                                                } else if height > 30.0 {
-                                                    rgb(0xFF9800) // Medium - orange
+                                                } else if height > 54.0 {
+                                                    rgb(0xe94560)
+                                                } else if height > 35.0 {
+                                                    rgb(0xFF9800)
                                                 } else {
-                                                    rgb(0x4CAF50) // Low - green
+                                                    rgb(0x4CAF50)
                                                 })
                                         })),
                                 )
@@ -326,8 +661,9 @@ impl Adlib {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .cursor_pointer()
                                         .hover(|style| style.opacity(0.9))
-                                        .on_click(cx.listener(|this, _, _w, _cx| {
+                                        .on_click(cx.listener(|this, _, _w, cx| {
                                             this.state.start_recording();
+                                            this.start_audio_capture(cx);
                                         }))
                                         .child("Record"),
                                 )
@@ -381,7 +717,12 @@ impl Adlib {
                                         .cursor_pointer()
                                         .hover(|style| style.opacity(0.9))
                                         .on_click(cx.listener(|this, _, _w, _cx| {
-                                            this.state.stop_recording();
+                                            let saved_path = this.stop_audio_capture();
+                                            let file_name = saved_path.and_then(|p| {
+                                                p.file_name().map(|f| f.to_string_lossy().to_string())
+                                            });
+                                            this.state.stop_recording(file_name);
+                                            this.save_recordings_to_db();
                                         }))
                                         .child("Stop & Save"),
                                 )
@@ -398,6 +739,7 @@ impl Adlib {
                                         .hover(|style| style.opacity(0.9))
                                         .on_click(cx.listener(|this, _, _w, _cx| {
                                             this.state.cancel_recording();
+                                            let _ = this.audio_capture.stop();
                                         }))
                                         .child("Cancel"),
                                 )
@@ -577,7 +919,7 @@ impl Adlib {
             )
     }
 
-    fn render_recording_details(&self, id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_recording_details(&mut self, id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let format_duration = |seconds: f64| {
             let total_seconds = seconds as u64;
             let minutes = total_seconds / 60;
@@ -586,6 +928,13 @@ impl Adlib {
         };
 
         let recording = self.state.get_recording(id).cloned();
+
+        // Get playback state
+        let is_playing = self.playback_state.is_playing();
+        let current_time = self.playback_state.current_time();
+        let progress = self.playback_state.progress();
+        let waveform = self.playback_state.waveform();
+        let file_name_for_load = id.to_string();
 
         match recording {
             None => div()
@@ -602,8 +951,21 @@ impl Adlib {
             Some(recording) => {
                 let text = recording.text().to_string();
                 let has_text = !text.is_empty();
-                let duration_str = format_duration(recording.duration_seconds);
+                let duration = recording.duration_seconds;
+                let duration_str = format_duration(duration);
+                let current_time_str = format_duration(current_time);
                 let title = recording.title.clone();
+                let file_name = recording.file_name.clone();
+
+                // Check if the audio file exists
+                let file_exists = self.recording_exists(&file_name);
+                let load_error = self.load_error.clone();
+
+                // Check if this recording is loaded
+                let is_loaded = self.loaded_recording_path
+                    .as_ref()
+                    .map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()) == Some(file_name.clone()))
+                    .unwrap_or(false);
 
                 div()
                     .flex()
@@ -630,6 +992,7 @@ impl Adlib {
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(0x3d3d54)))
                                     .on_click(cx.listener(|this, _, _w, _cx| {
+                                        this.stop_playback();
                                         this.state.navigate_to(ActiveView::RecordingList);
                                     }))
                                     .child("< Back"),
@@ -643,36 +1006,160 @@ impl Adlib {
                                     .child(title),
                             ),
                     )
+                    // Waveform and playback controls
                     .child(
                         div()
                             .px_6()
-                            .py_3()
+                            .py_4()
                             .border_b_1()
                             .border_color(rgb(0x2d2d44))
                             .bg(rgb(0x1a1a2e))
                             .flex()
-                            .items_center()
-                            .gap_4()
+                            .flex_col()
+                            .gap_3()
+                            // Waveform visualization
                             .child(
                                 div()
-                                    .id("play-btn")
-                                    .w(px(40.0))
-                                    .h(px(40.0))
-                                    .rounded_full()
-                                    .bg(rgb(0xe94560))
+                                    .flex()
+                                    .items_end()
+                                    .justify_center()
+                                    .gap_px()
+                                    .h(px(60.0))
+                                    // File missing message
+                                    .when(!file_exists, |el| {
+                                        el.child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0xf44336))
+                                                        .child("Audio file not found"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x666666))
+                                                        .child(file_name.clone()),
+                                                ),
+                                        )
+                                    })
+                                    // Load error message
+                                    .when(file_exists && load_error.is_some() && waveform.is_empty(), |el| {
+                                        let error_msg = load_error.clone().unwrap_or_default();
+                                        el.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0xf44336))
+                                                .child(error_msg),
+                                        )
+                                    })
+                                    // Ready to load message
+                                    .when(file_exists && load_error.is_none() && waveform.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0x666666))
+                                                .child("Click play to load waveform"),
+                                        )
+                                    })
+                                    // Waveform bars
+                                    .when(!waveform.is_empty(), |el| {
+                                        let num_bars = waveform.len();
+                                        let position_bar = (progress * num_bars as f32) as usize;
+                                        el.children(waveform.iter().enumerate().map(|(i, &sample)| {
+                                            let height = (sample * 200.0).clamp(3.0, 60.0);
+                                            let is_played = i < position_bar;
+                                            let is_current = i == position_bar;
+                                            let color = if is_current {
+                                                rgb(0xffffff)
+                                            } else if is_played {
+                                                rgb(0xe94560)
+                                            } else {
+                                                rgb(0x4a4a6a)
+                                            };
+                                            div()
+                                                .w(px(3.0))
+                                                .h(px(height))
+                                                .rounded_sm()
+                                                .bg(color)
+                                        }))
+                                    }),
+                            )
+                            // Playback controls row
+                            .child(
+                                div()
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .hover(|style| style.opacity(0.9))
-                                    .child(div().text_color(rgb(0xffffff)).child(">")),
-                            )
-                            .child(div().flex_grow().h(px(8.0)).bg(rgb(0x2d2d44)).rounded_full())
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0x888888))
-                                    .child(format!("0:00 / {}", duration_str)),
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .id("play-btn")
+                                            .w(px(40.0))
+                                            .h(px(40.0))
+                                            .rounded_full()
+                                            .bg(if file_exists { rgb(0xe94560) } else { rgb(0x444444) })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(file_exists, |el| {
+                                                el.cursor_pointer()
+                                                    .hover(|style| style.opacity(0.9))
+                                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                                        // Load recording if not loaded
+                                                        let file_to_load = file_name_for_load.clone();
+                                                        let needs_load = !this.loaded_recording_path
+                                                            .as_ref()
+                                                            .map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()) == Some(file_to_load.clone()))
+                                                            .unwrap_or(false);
+
+                                                        if needs_load {
+                                                            if let Err(e) = this.load_recording(&file_to_load) {
+                                                                eprintln!("Failed to load recording: {}", e);
+                                                                cx.notify(); // Refresh UI to show error
+                                                                return;
+                                                            }
+                                                        }
+
+                                                        this.toggle_playback(cx);
+                                                    }))
+                                            })
+                                            .child(
+                                                div()
+                                                    .text_color(if file_exists { rgb(0xffffff) } else { rgb(0x888888) })
+                                                    .child(if is_playing && is_loaded { "||" } else { ">" }),
+                                            ),
+                                    )
+                                    // Progress bar
+                                    .child(
+                                        div()
+                                            .flex_grow()
+                                            .h(px(8.0))
+                                            .bg(rgb(0x2d2d44))
+                                            .rounded_full()
+                                            .relative()
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left_0()
+                                                    .top_0()
+                                                    .h_full()
+                                                    .rounded_full()
+                                                    .bg(rgb(0xe94560))
+                                                    .w(relative(progress)),
+                                            ),
+                                    )
+                                    // Time display
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0x888888))
+                                            .min_w(px(80.0))
+                                            .child(format!("{} / {}", current_time_str, duration_str)),
+                                    ),
                             ),
                     )
                     .child(

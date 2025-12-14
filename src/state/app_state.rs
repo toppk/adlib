@@ -1,5 +1,4 @@
 use crate::models::{RecordingInfo, Settings};
-use chrono::Utc;
 use uuid::Uuid;
 
 /// The currently active view/screen
@@ -94,12 +93,15 @@ impl AppState {
     }
 
     /// Stop and save the current recording
-    pub fn stop_recording(&mut self) {
-        if let Some(file_name) = self.record_screen.current_file.take() {
-            let mut recording = RecordingInfo::new(file_name);
-            recording.duration_seconds = self.record_screen.duration_seconds;
-            self.recordings.insert(0, recording);
-        }
+    /// If actual_file_name is provided, use it instead of the placeholder
+    pub fn stop_recording(&mut self, actual_file_name: Option<String>) {
+        let file_name = actual_file_name
+            .or_else(|| self.record_screen.current_file.take())
+            .unwrap_or_else(|| "unknown.wav".to_string());
+
+        let mut recording = RecordingInfo::new(file_name);
+        recording.duration_seconds = self.record_screen.duration_seconds;
+        self.recordings.insert(0, recording);
         self.record_screen = RecordScreenState::default();
     }
 
@@ -130,36 +132,5 @@ impl AppState {
     /// Toggle help overlay
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
-    }
-
-    /// Add demo recordings for UI development
-    pub fn add_demo_recordings(&mut self) {
-        let demo_recordings = vec![
-            RecordingInfo {
-                file_name: "demo1.wav".to_string(),
-                title: "Team Meeting Notes".to_string(),
-                date: Utc::now(),
-                duration_seconds: 125.5,
-                edited_text: None,
-                transcription: None,
-            },
-            RecordingInfo {
-                file_name: "demo2.wav".to_string(),
-                title: "Project Ideas".to_string(),
-                date: Utc::now() - chrono::Duration::hours(2),
-                duration_seconds: 45.2,
-                edited_text: Some("This is a demo transcription text for the project ideas recording. It demonstrates how the text would appear in the details view.".to_string()),
-                transcription: None,
-            },
-            RecordingInfo {
-                file_name: "demo3.wav".to_string(),
-                title: "Voice Memo".to_string(),
-                date: Utc::now() - chrono::Duration::days(1),
-                duration_seconds: 12.8,
-                edited_text: None,
-                transcription: None,
-            },
-        ];
-        self.recordings = demo_recordings;
     }
 }

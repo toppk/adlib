@@ -10,6 +10,7 @@ use pw::spa::pod::Pod;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 /// Represents an audio input device
 #[derive(Clone, Debug)]
@@ -69,6 +70,14 @@ struct CaptureStateInner {
     pub error: Option<String>,
     /// Sample rate being used
     pub sample_rate: u32,
+    /// Counter for waveform decimation (to slow down display)
+    waveform_counter: u32,
+    /// Accumulated RMS for averaging over multiple callbacks
+    waveform_rms_sum: f32,
+    /// Time of last waveform sample addition (for smooth scrolling)
+    last_waveform_time: Option<Instant>,
+    /// Interval between waveform samples in seconds (for smooth scrolling)
+    waveform_interval_secs: f32,
 }
 
 impl SharedCaptureState {
@@ -77,12 +86,16 @@ impl SharedCaptureState {
             inner: Arc::new(Mutex::new(CaptureStateInner {
                 volume_level: 0.0,
                 peak_level: 0.0,
-                waveform_samples: Vec::with_capacity(64),
+                waveform_samples: Vec::with_capacity(96),
                 samples: Vec::new(),
                 duration: 0.0,
                 state: CaptureState::Idle,
                 error: None,
                 sample_rate: 16000,
+                waveform_counter: 0,
+                waveform_rms_sum: 0.0,
+                last_waveform_time: None,
+                waveform_interval_secs: 0.08, // ~80ms default
             })),
         }
     }
@@ -111,6 +124,10 @@ impl SharedCaptureState {
         self.inner.lock().unwrap().samples.clone()
     }
 
+    pub fn sample_rate(&self) -> u32 {
+        self.inner.lock().unwrap().sample_rate
+    }
+
     pub fn error(&self) -> Option<String> {
         self.inner.lock().unwrap().error.clone()
     }
@@ -134,6 +151,21 @@ impl SharedCaptureState {
         inner.peak_level = 0.0;
         inner.error = None;
         inner.state = CaptureState::Idle;
+        inner.waveform_counter = 0;
+        inner.waveform_rms_sum = 0.0;
+        inner.last_waveform_time = None;
+    }
+
+    /// Get scroll phase for smooth waveform animation (0.0 to 1.0)
+    /// Returns how far we've progressed toward the next sample shift
+    pub fn waveform_scroll_phase(&self) -> f32 {
+        let inner = self.inner.lock().unwrap();
+        if let Some(last_time) = inner.last_waveform_time {
+            let elapsed = last_time.elapsed().as_secs_f32();
+            (elapsed / inner.waveform_interval_secs).min(1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Process incoming audio samples
@@ -156,10 +188,29 @@ impl SharedCaptureState {
         let max = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         inner.peak_level = (inner.peak_level * 0.95).max(max);
 
-        // Add to waveform display (keep last 64 samples for visualization)
-        inner.waveform_samples.push(rms);
-        if inner.waveform_samples.len() > 64 {
-            inner.waveform_samples.remove(0);
+        // Add to waveform display with decimation for slower scrolling
+        // Accumulate RMS over multiple callbacks, then average
+        // Decimation factor of 4 gives ~3-4 seconds of visible history
+        const WAVEFORM_DECIMATION: u32 = 4;
+        inner.waveform_rms_sum += rms;
+        inner.waveform_counter += 1;
+
+        if inner.waveform_counter >= WAVEFORM_DECIMATION {
+            // Calculate actual interval for smooth scrolling
+            if let Some(last_time) = inner.last_waveform_time {
+                inner.waveform_interval_secs = last_time.elapsed().as_secs_f32();
+            }
+            inner.last_waveform_time = Some(Instant::now());
+
+            // Push averaged RMS value
+            let avg_rms = inner.waveform_rms_sum / WAVEFORM_DECIMATION as f32;
+            inner.waveform_samples.push(avg_rms);
+            if inner.waveform_samples.len() > 96 {
+                inner.waveform_samples.remove(0);
+            }
+            // Reset accumulator
+            inner.waveform_counter = 0;
+            inner.waveform_rms_sum = 0.0;
         }
 
         // Append samples for recording
