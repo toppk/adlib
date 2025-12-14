@@ -6,6 +6,7 @@ mod app;
 mod assets;
 mod audio;
 mod models;
+mod settings;
 mod state;
 mod tokio_runtime;
 mod transcription;

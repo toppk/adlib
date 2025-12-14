@@ -73,6 +73,12 @@ impl Adlib {
             }
         }
 
+        // Load settings from dconf
+        if let Some(model_name) = crate::settings::get_selected_model() {
+            state.settings.selected_model_name = model_name;
+        }
+        state.settings.is_using_gpu = crate::settings::get_use_gpu();
+
         let audio_capture = AudioCapture::new();
         let capture_state = audio_capture.shared_state();
         let audio_player = AudioPlayer::new();
@@ -445,6 +451,7 @@ impl Adlib {
     fn select_model(&mut self, model: WhisperModel) {
         if self.is_model_downloaded(model) {
             self.state.settings.selected_model_name = model.short_name().to_string();
+            crate::settings::set_selected_model(model.short_name());
         }
     }
 
@@ -457,6 +464,7 @@ impl Adlib {
             // Reset selection if we deleted the selected model
             if self.state.settings.selected_model_name == model.short_name() {
                 self.state.settings.selected_model_name = String::new();
+                crate::settings::set_selected_model("");
             }
         }
     }
@@ -468,6 +476,7 @@ impl Adlib {
             self.download_error = Some(format!("Failed to delete models: {}", e));
         } else {
             self.state.settings.selected_model_name = String::new();
+            crate::settings::set_selected_model("");
         }
     }
 
@@ -2796,7 +2805,36 @@ impl Adlib {
                             .child(setting_row(
                                 "Use GPU Acceleration",
                                 "Faster transcription if available",
-                                toggle_switch(is_gpu),
+                                {
+                                    let bg = if is_gpu { rgb(0x4CAF50) } else { rgb(0x2d2d44) };
+                                    let dot_position = if is_gpu { px(22.0) } else { px(2.0) };
+                                    div()
+                                        .id("toggle-gpu")
+                                        .w(px(44.0))
+                                        .h(px(24.0))
+                                        .rounded_full()
+                                        .bg(bg)
+                                        .cursor_pointer()
+                                        .relative()
+                                        .on_click(cx.listener(|this, _, _w, cx| {
+                                            this.state.settings.is_using_gpu =
+                                                !this.state.settings.is_using_gpu;
+                                            crate::settings::set_use_gpu(
+                                                this.state.settings.is_using_gpu,
+                                            );
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(2.0))
+                                                .left(dot_position)
+                                                .w(px(20.0))
+                                                .h(px(20.0))
+                                                .rounded_full()
+                                                .bg(rgb(0xffffff)),
+                                        )
+                                },
                             ))
                             .child(setting_row(
                                 "Live Transcription",
