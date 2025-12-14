@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::models::{RecordingInfo, Settings};
 use uuid::Uuid;
 
@@ -127,7 +129,9 @@ impl AppState {
 
     /// Get a mutable recording by file name
     pub fn get_recording_mut(&mut self, file_name: &str) -> Option<&mut RecordingInfo> {
-        self.recordings.iter_mut().find(|r| r.file_name == file_name)
+        self.recordings
+            .iter_mut()
+            .find(|r| r.file_name == file_name)
     }
 
     /// Toggle help overlay

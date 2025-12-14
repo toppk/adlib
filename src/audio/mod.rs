@@ -10,6 +10,6 @@ mod capture;
 mod playback;
 mod recorder;
 
-pub use capture::{AudioCapture, AudioDevice, CaptureState, SharedCaptureState};
+pub use capture::{AudioCapture, CaptureState, SharedCaptureState};
 pub use playback::{AudioPlayer, SharedPlaybackState};
 pub use recorder::WavRecorder;

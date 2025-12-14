@@ -2,6 +2,8 @@
 //!
 //! Stores recording metadata in a JSON file at ~/.local/share/adlib/recordings.json
 
+#![allow(dead_code)]
+
 use crate::models::RecordingInfo;
 use chrono::{Duration, Utc};
 use std::fs;
@@ -64,20 +66,27 @@ impl RecordingsDatabase {
         let contents = serde_json::to_string_pretty(recordings)
             .map_err(|e| format!("Failed to serialize recordings: {}", e))?;
 
-        fs::write(&self.path, contents)
-            .map_err(|e| format!("Failed to write database: {}", e))?;
+        fs::write(&self.path, contents).map_err(|e| format!("Failed to write database: {}", e))?;
 
         Ok(())
     }
 
     /// Add a new recording and save to database
-    pub fn add_recording(&self, recording: RecordingInfo, existing: &mut Vec<RecordingInfo>) -> Result<(), String> {
+    pub fn add_recording(
+        &self,
+        recording: RecordingInfo,
+        existing: &mut Vec<RecordingInfo>,
+    ) -> Result<(), String> {
         existing.insert(0, recording);
         self.save(existing)
     }
 
     /// Delete a recording and save to database
-    pub fn delete_recording(&self, file_name: &str, existing: &mut Vec<RecordingInfo>) -> Result<(), String> {
+    pub fn delete_recording(
+        &self,
+        file_name: &str,
+        existing: &mut Vec<RecordingInfo>,
+    ) -> Result<(), String> {
         existing.retain(|r| r.file_name != file_name);
         self.save(existing)
     }

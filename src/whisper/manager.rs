@@ -2,11 +2,13 @@
 //!
 //! Downloads models from Hugging Face with progress tracking and resume support.
 
+#![allow(dead_code)]
+
 use hf_hub::api::sync::ApiBuilder;
 use hf_hub::Cache;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -371,10 +373,14 @@ impl ModelManager {
 
     /// Download a model (blocking) - creates a fresh API client
     /// Returns the path to the downloaded model
-    pub fn download_model(model: WhisperModel, cache_dir: &PathBuf, repo_id: &str) -> Result<PathBuf, String> {
+    pub fn download_model(
+        model: WhisperModel,
+        cache_dir: &Path,
+        repo_id: &str,
+    ) -> Result<PathBuf, String> {
         // Create API client for this download
         let api = ApiBuilder::new()
-            .with_cache_dir(cache_dir.clone())
+            .with_cache_dir(cache_dir.to_path_buf())
             .build()
             .map_err(|e| format!("Failed to create HuggingFace API: {}", e))?;
 
@@ -422,8 +428,7 @@ impl ModelManager {
     /// Delete a downloaded model
     pub fn delete_model(&self, model: WhisperModel) -> Result<(), String> {
         if let Some(path) = self.get_cached_model_path(model) {
-            fs::remove_file(&path)
-                .map_err(|e| format!("Failed to delete model: {}", e))?;
+            fs::remove_file(&path).map_err(|e| format!("Failed to delete model: {}", e))?;
 
             // Also try to remove the parent directory if empty
             if let Some(parent) = path.parent() {
@@ -455,7 +460,10 @@ mod tests {
     #[test]
     fn test_model_names() {
         assert_eq!(WhisperModel::Tiny.short_name(), "tiny");
-        assert_eq!(WhisperModel::from_short_name("tiny"), Some(WhisperModel::Tiny));
+        assert_eq!(
+            WhisperModel::from_short_name("tiny"),
+            Some(WhisperModel::Tiny)
+        );
         assert_eq!(WhisperModel::from_short_name("invalid"), None);
     }
 

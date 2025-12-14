@@ -1,6 +1,8 @@
 //! Main application component for Adlib
 
-use crate::audio::{AudioCapture, AudioPlayer, CaptureState, SharedCaptureState, SharedPlaybackState, WavRecorder};
+use crate::audio::{
+    AudioCapture, AudioPlayer, CaptureState, SharedCaptureState, SharedPlaybackState, WavRecorder,
+};
 use crate::models::{RecordingInfo, Segment, Transcription, TranscriptionStatus};
 use crate::state::{ActiveView, AppState, RecordingsDatabase};
 use crate::transcription::{resample, LiveTranscriber, TranscriptionEngine, TranscriptionOptions};
@@ -207,12 +209,11 @@ impl Adlib {
         }
 
         // Load the WAV file
-        let (samples, sample_rate) = WavRecorder::load(&path)
-            .map_err(|e| {
-                let err = format!("{} (path: {:?})", e, path);
-                self.load_error = Some(err.clone());
-                err
-            })?;
+        let (samples, sample_rate) = WavRecorder::load(&path).map_err(|e| {
+            let err = format!("{} (path: {:?})", e, path);
+            self.load_error = Some(err.clone());
+            err
+        })?;
 
         // Load into the player
         self.audio_player.load(samples, sample_rate);
@@ -281,6 +282,7 @@ impl Adlib {
     }
 
     /// Add a new recording and save to database
+    #[allow(dead_code)]
     fn add_recording(&mut self, recording: RecordingInfo) {
         self.state.recordings.insert(0, recording);
         self.save_recordings_to_db();
@@ -330,7 +332,10 @@ impl Adlib {
         // Get cache_dir and repo_id from manager (quick lock, then release)
         let (cache_dir, repo_id) = {
             let manager = self.model_manager.lock().unwrap();
-            (manager.cache_dir().clone(), "ggerganov/whisper.cpp".to_string())
+            (
+                manager.cache_dir().clone(),
+                "ggerganov/whisper.cpp".to_string(),
+            )
         };
 
         // Spawn download task - does NOT hold the mutex lock
@@ -345,7 +350,7 @@ impl Adlib {
                         let progress = progress.clone();
                         async move {
                             crate::whisper::ModelManager::download_model_with_progress(
-                                model, cache_dir, repo_id, progress
+                                model, cache_dir, repo_id, progress,
                             )
                         }
                     })
@@ -357,7 +362,11 @@ impl Adlib {
                         this.active_download = None;
 
                         if let Err(e) = result {
-                            this.download_error = Some(format!("Failed to download {}: {}", model.display_name(), e));
+                            this.download_error = Some(format!(
+                                "Failed to download {}: {}",
+                                model.display_name(),
+                                e
+                            ));
                         }
 
                         // Process next in queue
@@ -477,7 +486,9 @@ impl Adlib {
         // Get the selected model
         let selected_model_name = self.state.settings.selected_model_name.clone();
         if selected_model_name.is_empty() {
-            self.transcription_status = Some("No model selected. Go to Settings to download and select a model.".to_string());
+            self.transcription_status = Some(
+                "No model selected. Go to Settings to download and select a model.".to_string(),
+            );
             return;
         }
 
@@ -499,7 +510,8 @@ impl Adlib {
         };
 
         let Some(model_path) = model_path else {
-            self.transcription_status = Some(format!("Model {} is not downloaded", model.display_name()));
+            self.transcription_status =
+                Some(format!("Model {} is not downloaded", model.display_name()));
             return;
         };
 
@@ -555,10 +567,13 @@ impl Adlib {
 
                         match result {
                             Ok(transcription_result) => {
-                                this.transcription_status = Some("Transcription complete!".to_string());
+                                this.transcription_status =
+                                    Some("Transcription complete!".to_string());
 
                                 // Update the recording with transcription
-                                if let Some(recording) = this.state.get_recording_mut(&file_name_clone) {
+                                if let Some(recording) =
+                                    this.state.get_recording_mut(&file_name_clone)
+                                {
                                     let mut transcription = Transcription::new(
                                         file_name_clone.clone(),
                                         model.display_name().to_string(),
@@ -568,7 +583,8 @@ impl Adlib {
                                     transcription.status = TranscriptionStatus::Done;
 
                                     // Store timestamped segments for karaoke-style display
-                                    transcription.segments = transcription_result.segments
+                                    transcription.segments = transcription_result
+                                        .segments
                                         .into_iter()
                                         .map(|seg| Segment {
                                             start_ms: (seg.start * 1000.0) as i64,
@@ -589,7 +605,8 @@ impl Adlib {
                                 }
                             }
                             Err(e) => {
-                                this.transcription_status = Some(format!("Transcription failed: {}", e));
+                                this.transcription_status =
+                                    Some(format!("Transcription failed: {}", e));
                             }
                         }
 
@@ -732,12 +749,7 @@ impl Render for Adlib {
                                 }
                                 window.remove_window();
                             }))
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .text_color(rgb(0xcccccc))
-                                    .child("×"),
-                            ),
+                            .child(div().text_lg().text_color(rgb(0xcccccc)).child("×")),
                     ),
             )
             // Main content area (sidebar + content)
@@ -760,212 +772,257 @@ impl Render for Adlib {
                                 // App title
                                 div()
                                     .px_4()
-                            .py_3()
-                            .border_b_1()
-                            .border_color(rgb(0x2d2d44))
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xe94560))
-                                    .child("Adlib"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x888888))
-                                    .child("Voice Recorder"),
-                            ),
-                    )
-                    .child(
-                        // Navigation items
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .p_2()
-                            .flex_grow()
-                            .child(
-                                div()
-                                    .id("nav-live")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(if is_live { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
-                                    .text_color(if is_live { rgb(0xe94560) } else { rgb(0xcccccc) })
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x2d2d44)))
-                                    .on_click(cx.listener(|this, _, _w, _cx| {
-                                        this.state.navigate_to(ActiveView::Live);
-                                    }))
-                                    .child("Live"),
-                            )
-                            .child(
-                                div()
-                                    .id("nav-record")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(if is_record { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
-                                    .text_color(if is_record { rgb(0xe94560) } else { rgb(0xcccccc) })
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x2d2d44)))
-                                    .on_click(cx.listener(|this, _, _w, _cx| {
-                                        this.state.navigate_to(ActiveView::Record);
-                                    }))
-                                    .child("Record"),
-                            )
-                            .child(
-                                div()
-                                    .id("nav-recordings")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(if is_list { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
-                                    .text_color(if is_list { rgb(0xe94560) } else { rgb(0xcccccc) })
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x2d2d44)))
-                                    .on_click(cx.listener(|this, _, _w, _cx| {
-                                        this.state.navigate_to(ActiveView::RecordingList);
-                                    }))
-                                    .child("Recordings"),
-                            )
-                            .child(
-                                div()
-                                    .id("nav-settings")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(if is_settings { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
-                                    .text_color(if is_settings { rgb(0xe94560) } else { rgb(0xcccccc) })
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x2d2d44)))
-                                    .on_click(cx.listener(|this, _, _w, _cx| {
-                                        this.state.navigate_to(ActiveView::Settings);
-                                    }))
-                                    .child("Settings"),
-                            ),
-                    )
-                    // Download status (when active)
-                    .when(has_active_download || download_error.is_some(), |el| {
-                        el.child(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .border_t_1()
-                                .border_color(rgb(0x2d2d44))
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                // Error message
-                                .when(download_error.is_some(), |el| {
-                                    let err = download_error.clone().unwrap_or_default();
-                                    el.child(
+                                    .py_3()
+                                    .border_b_1()
+                                    .border_color(rgb(0x2d2d44))
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xe94560))
+                                            .child("Adlib"),
+                                    )
+                                    .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0xf44336))
-                                            .child(err),
-                                    )
-                                })
-                                // Active download
-                                .when(has_active_download, |el| {
-                                    let model_name = download_model_name.unwrap_or("Model");
-                                    let progress_pct = (download_progress * 100.0) as u32;
-                                    el.child(
+                                            .text_color(rgb(0x888888))
+                                            .child("Voice Recorder"),
+                                    ),
+                            )
+                            .child(
+                                // Navigation items
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .p_2()
+                                    .flex_grow()
+                                    .child(
                                         div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
+                                            .id("nav-live")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if is_live {
+                                                rgb(0x2d2d44)
+                                            } else {
+                                                rgb(0x1a1a2e)
+                                            })
+                                            .text_color(if is_live {
+                                                rgb(0xe94560)
+                                            } else {
+                                                rgb(0xcccccc)
+                                            })
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x2d2d44)))
+                                            .on_click(cx.listener(|this, _, _w, _cx| {
+                                                this.state.navigate_to(ActiveView::Live);
+                                            }))
+                                            .child("Live"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("nav-record")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if is_record {
+                                                rgb(0x2d2d44)
+                                            } else {
+                                                rgb(0x1a1a2e)
+                                            })
+                                            .text_color(if is_record {
+                                                rgb(0xe94560)
+                                            } else {
+                                                rgb(0xcccccc)
+                                            })
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x2d2d44)))
+                                            .on_click(cx.listener(|this, _, _w, _cx| {
+                                                this.state.navigate_to(ActiveView::Record);
+                                            }))
+                                            .child("Record"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("nav-recordings")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if is_list {
+                                                rgb(0x2d2d44)
+                                            } else {
+                                                rgb(0x1a1a2e)
+                                            })
+                                            .text_color(if is_list {
+                                                rgb(0xe94560)
+                                            } else {
+                                                rgb(0xcccccc)
+                                            })
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x2d2d44)))
+                                            .on_click(cx.listener(|this, _, _w, _cx| {
+                                                this.state.navigate_to(ActiveView::RecordingList);
+                                            }))
+                                            .child("Recordings"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("nav-settings")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(if is_settings {
+                                                rgb(0x2d2d44)
+                                            } else {
+                                                rgb(0x1a1a2e)
+                                            })
+                                            .text_color(if is_settings {
+                                                rgb(0xe94560)
+                                            } else {
+                                                rgb(0xcccccc)
+                                            })
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x2d2d44)))
+                                            .on_click(cx.listener(|this, _, _w, _cx| {
+                                                this.state.navigate_to(ActiveView::Settings);
+                                            }))
+                                            .child("Settings"),
+                                    ),
+                            )
+                            // Download status (when active)
+                            .when(has_active_download || download_error.is_some(), |el| {
+                                el.child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .border_t_1()
+                                        .border_color(rgb(0x2d2d44))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        // Error message
+                                        .when(download_error.is_some(), |el| {
+                                            let err = download_error.clone().unwrap_or_default();
+                                            el.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xf44336))
+                                                    .child(err),
+                                            )
+                                        })
+                                        // Active download
+                                        .when(has_active_download, |el| {
+                                            let model_name = download_model_name.unwrap_or("Model");
+                                            let progress_pct = (download_progress * 100.0) as u32;
+                                            el.child(
                                                 div()
                                                     .flex()
-                                                    .justify_between()
-                                                    .items_center()
+                                                    .flex_col()
+                                                    .gap_1()
                                                     .child(
                                                         div()
-                                                            .text_xs()
-                                                            .text_color(rgb(0xcccccc))
-                                                            .child(format!("Downloading {}", model_name)),
+                                                            .flex()
+                                                            .justify_between()
+                                                            .items_center()
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(0xcccccc))
+                                                                    .child(format!(
+                                                                        "Downloading {}",
+                                                                        model_name
+                                                                    )),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .id("cancel-download")
+                                                                    .text_xs()
+                                                                    .text_color(rgb(0xf44336))
+                                                                    .cursor_pointer()
+                                                                    .hover(|s| {
+                                                                        s.text_color(rgb(0xff6666))
+                                                                    })
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, _w, cx| {
+                                                                            this.cancel_download(
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    ))
+                                                                    .child("Cancel"),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        // Progress bar
+                                                        div()
+                                                            .w_full()
+                                                            .h(px(4.0))
+                                                            .bg(rgb(0x2d2d44))
+                                                            .rounded_full()
+                                                            .child(
+                                                                div()
+                                                                    .h_full()
+                                                                    .rounded_full()
+                                                                    .bg(rgb(0xFF9800))
+                                                                    .w(relative(download_progress)),
+                                                            ),
                                                     )
                                                     .child(
                                                         div()
-                                                            .id("cancel-download")
                                                             .text_xs()
-                                                            .text_color(rgb(0xf44336))
-                                                            .cursor_pointer()
-                                                            .hover(|s| s.text_color(rgb(0xff6666)))
-                                                            .on_click(cx.listener(|this, _, _w, cx| {
-                                                                this.cancel_download(cx);
-                                                            }))
-                                                            .child("Cancel"),
+                                                            .text_color(rgb(0x888888))
+                                                            .child(if queue_count > 0 {
+                                                                format!(
+                                                                    "{}% ({} queued)",
+                                                                    progress_pct, queue_count
+                                                                )
+                                                            } else {
+                                                                format!("{}%", progress_pct)
+                                                            }),
                                                     ),
                                             )
-                                            .child(
-                                                // Progress bar
-                                                div()
-                                                    .w_full()
-                                                    .h(px(4.0))
-                                                    .bg(rgb(0x2d2d44))
-                                                    .rounded_full()
-                                                    .child(
-                                                        div()
-                                                            .h_full()
-                                                            .rounded_full()
-                                                            .bg(rgb(0xFF9800))
-                                                            .w(relative(download_progress)),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(0x888888))
-                                                    .child(if queue_count > 0 {
-                                                        format!("{}% ({} queued)", progress_pct, queue_count)
-                                                    } else {
-                                                        format!("{}%", progress_pct)
-                                                    }),
-                                            ),
-                                    )
-                                }),
-                        )
-                    })
+                                        }),
+                                )
+                            })
+                            .child(
+                                // Help hint at bottom
+                                div()
+                                    .px_4()
+                                    .py_3()
+                                    .border_t_1()
+                                    .border_color(rgb(0x2d2d44))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x666666))
+                                            .child("Press F1 for help"),
+                                    ),
+                            ),
+                    )
+                    // Main content area
                     .child(
-                        // Help hint at bottom
                         div()
-                            .px_4()
-                            .py_3()
-                            .border_t_1()
-                            .border_color(rgb(0x2d2d44))
-                            .child(div().text_xs().text_color(rgb(0x666666)).child("Press F1 for help")),
+                            .flex_grow()
+                            .h_full()
+                            .relative()
+                            .child(match &active_view {
+                                ActiveView::Live => self.render_live_view(cx).into_any_element(),
+                                ActiveView::Record => {
+                                    self.render_record_view(cx).into_any_element()
+                                }
+                                ActiveView::RecordingList => {
+                                    self.render_recording_list(cx).into_any_element()
+                                }
+                                ActiveView::RecordingDetails(id) => {
+                                    let id = id.clone();
+                                    self.render_recording_details(&id, cx).into_any_element()
+                                }
+                                ActiveView::Settings => self.render_settings(cx).into_any_element(),
+                            })
+                            .when(show_help, |el| el.child(render_help_overlay())),
                     ),
             )
-            // Main content area
-            .child(
-                div()
-                    .flex_grow()
-                    .h_full()
-                    .relative()
-                    .child(match &active_view {
-                        ActiveView::Live => {
-                            self.render_live_view(cx).into_any_element()
-                        }
-                        ActiveView::Record => {
-                            self.render_record_view(cx).into_any_element()
-                        }
-                        ActiveView::RecordingList => {
-                            self.render_recording_list(cx).into_any_element()
-                        }
-                        ActiveView::RecordingDetails(id) => {
-                            let id = id.clone();
-                            self.render_recording_details(&id, cx).into_any_element()
-                        }
-                        ActiveView::Settings => {
-                            self.render_settings(cx).into_any_element()
-                        }
-                    })
-                    .when(show_help, |el| el.child(render_help_overlay())),
-            ),
-        )
     }
 }
 
@@ -989,7 +1046,8 @@ impl Adlib {
         };
 
         let Some(model_path) = model_path else {
-            self.live_error = Some("No model downloaded. Go to Settings to download a model.".to_string());
+            self.live_error =
+                Some("No model downloaded. Go to Settings to download a model.".to_string());
             return;
         };
 
@@ -1027,9 +1085,9 @@ impl Adlib {
             async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 loop {
                     // Check if still running
-                    let should_stop = this.update(cx, |this, _| {
-                        !this.live_is_running
-                    }).unwrap_or(true);
+                    let should_stop = this
+                        .update(cx, |this, _| !this.live_is_running)
+                        .unwrap_or(true);
 
                     if should_stop || ui_capture_state.state() != CaptureState::Capturing {
                         break;
@@ -1068,9 +1126,9 @@ impl Adlib {
                     .await;
 
                 // Check if we should stop
-                let should_stop = this.update(cx, |this, _| {
-                    !this.live_is_running
-                }).unwrap_or(true);
+                let should_stop = this
+                    .update(cx, |this, _| !this.live_is_running)
+                    .unwrap_or(true);
 
                 if should_stop {
                     break;
@@ -1114,7 +1172,8 @@ impl Adlib {
                     if ready {
                         // Process Whisper on a background thread to avoid blocking UI
                         let transcriber_clone = transcriber.clone();
-                        let (result, full_transcript) = cx.background_executor()
+                        let (result, full_transcript) = cx
+                            .background_executor()
                             .spawn(async move {
                                 let mut t = transcriber_clone.lock().unwrap();
                                 let result = t.process();
@@ -1180,10 +1239,12 @@ impl Adlib {
         self.live_duration = 0.0;
     }
 
-    /// Copy live transcript to clipboard
+    /// Copy live transcript to clipboard and primary selection (X11)
     fn copy_live_transcript(&self, cx: &mut Context<Self>) {
         if !self.live_transcript.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.live_transcript.clone()));
+            let item = ClipboardItem::new_string(self.live_transcript.clone());
+            cx.write_to_clipboard(item.clone());
+            cx.write_to_primary(item);
         }
     }
 
@@ -1194,17 +1255,20 @@ impl Adlib {
         let error = self.live_error.clone();
 
         // Get waveform from live capture if running
-        let waveform_samples = self.live_capture_state
+        let waveform_samples = self
+            .live_capture_state
             .as_ref()
             .map(|s| s.waveform_samples())
             .unwrap_or_default();
-        let _volume_level = self.live_capture_state
+        let _volume_level = self
+            .live_capture_state
             .as_ref()
             .map(|s| s.volume_level())
             .unwrap_or(0.0);
 
         // Get calibration status
-        let (is_calibrating, calibration_progress) = self.live_transcriber
+        let (is_calibrating, calibration_progress) = self
+            .live_transcriber
             .as_ref()
             .map(|t| {
                 let t = t.lock().unwrap();
@@ -1631,10 +1695,14 @@ impl Adlib {
 
                                                 if i >= first_bar_with_data {
                                                     // This bar has data
-                                                    let samples_to_skip = num_samples.saturating_sub(num_bars);
+                                                    let samples_to_skip =
+                                                        num_samples.saturating_sub(num_bars);
                                                     let bar_offset = i - first_bar_with_data;
                                                     let sample_idx = samples_to_skip + bar_offset;
-                                                    let sample = waveform_samples.get(sample_idx).copied().unwrap_or(0.0);
+                                                    let sample = waveform_samples
+                                                        .get(sample_idx)
+                                                        .copied()
+                                                        .unwrap_or(0.0);
                                                     (sample * 200.0).clamp(5.0, 60.0)
                                                 } else {
                                                     // No data yet - minimal height
@@ -1643,11 +1711,8 @@ impl Adlib {
                                             } else {
                                                 (volume_level * 200.0).clamp(5.0, 60.0)
                                             };
-                                            div()
-                                                .w(px(4.0))
-                                                .h(px(height))
-                                                .rounded_sm()
-                                                .bg(if is_paused {
+                                            div().w(px(4.0)).h(px(height)).rounded_sm().bg(
+                                                if is_paused {
                                                     rgb(0x444444)
                                                 } else if height > 54.0 {
                                                     rgb(0xe94560)
@@ -1655,7 +1720,8 @@ impl Adlib {
                                                     rgb(0xFF9800)
                                                 } else {
                                                     rgb(0x4CAF50)
-                                                })
+                                                },
+                                            )
                                         })),
                                 )
                                 .child(
@@ -1755,7 +1821,8 @@ impl Adlib {
                                         .on_click(cx.listener(|this, _, _w, _cx| {
                                             let saved_path = this.stop_audio_capture();
                                             let file_name = saved_path.and_then(|p| {
-                                                p.file_name().map(|f| f.to_string_lossy().to_string())
+                                                p.file_name()
+                                                    .map(|f| f.to_string_lossy().to_string())
                                             });
                                             this.state.stop_recording(file_name);
                                             this.save_recordings_to_db();
@@ -1781,17 +1848,13 @@ impl Adlib {
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x888888))
-                            .mt_8()
-                            .child(if is_recording {
-                                "Recording audio from your microphone"
-                            } else {
-                                "Click Record or press Space to start recording"
-                            }),
-                    ),
+                    .child(div().text_sm().text_color(rgb(0x888888)).mt_8().child(
+                        if is_recording {
+                            "Recording audio from your microphone"
+                        } else {
+                            "Click Record or press Space to start recording"
+                        },
+                    )),
             )
     }
 
@@ -1904,8 +1967,9 @@ impl Adlib {
                                 .cursor_pointer()
                                 .hover(|style| style.border_color(rgb(0xe94560)))
                                 .on_click(cx.listener(move |this, _, _w, _cx| {
-                                    this.state
-                                        .navigate_to(ActiveView::RecordingDetails(file_name.clone()));
+                                    this.state.navigate_to(ActiveView::RecordingDetails(
+                                        file_name.clone(),
+                                    ));
                                 }))
                                 .child(
                                     div()
@@ -1994,7 +2058,8 @@ impl Adlib {
                 let file_name = recording.file_name.clone();
 
                 // Get segments for karaoke display
-                let segments = recording.transcription
+                let segments = recording
+                    .transcription
                     .as_ref()
                     .map(|t| t.segments.clone())
                     .unwrap_or_default();
@@ -2006,9 +2071,13 @@ impl Adlib {
                 let load_error = self.load_error.clone();
 
                 // Check if this recording is loaded
-                let is_loaded = self.loaded_recording_path
+                let is_loaded = self
+                    .loaded_recording_path
                     .as_ref()
-                    .map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()) == Some(file_name.clone()))
+                    .map(|p| {
+                        p.file_name().map(|f| f.to_string_lossy().to_string())
+                            == Some(file_name.clone())
+                    })
                     .unwrap_or(false);
 
                 div()
@@ -2375,9 +2444,17 @@ impl Adlib {
             .px_4()
             .py_3()
             .rounded_lg()
-            .bg(if is_selected { rgb(0x2d2d44) } else { rgb(0x1a1a2e) })
+            .bg(if is_selected {
+                rgb(0x2d2d44)
+            } else {
+                rgb(0x1a1a2e)
+            })
             .border_1()
-            .border_color(if is_selected { rgb(0xe94560) } else { rgb(0x2d2d44) })
+            .border_color(if is_selected {
+                rgb(0xe94560)
+            } else {
+                rgb(0x2d2d44)
+            })
             // Model name
             .child(
                 div()
@@ -2593,9 +2670,11 @@ impl Adlib {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .children(downloaded_models.into_iter().map(|(model, is_selected)| {
-                                    self.render_downloaded_model_row(model, is_selected, cx)
-                                }))
+                                .children(downloaded_models.into_iter().map(
+                                    |(model, is_selected)| {
+                                        self.render_downloaded_model_row(model, is_selected, cx)
+                                    },
+                                ))
                                 .child(
                                     // Delete All button
                                     div()
@@ -2633,9 +2712,11 @@ impl Adlib {
                                 )
                             })
                             .when(!available_models.is_empty(), |el| {
-                                el.children(available_models.into_iter().map(|model| {
-                                    self.render_available_model_row(model, cx)
-                                }))
+                                el.children(
+                                    available_models
+                                        .into_iter()
+                                        .map(|model| self.render_available_model_row(model, cx)),
+                                )
                             })
                             .child(
                                 div()
@@ -2689,33 +2770,25 @@ impl Adlib {
                     // Storage
                     .child(settings_section(
                         "Storage",
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(
+                        div().flex().flex_col().gap_3().child(
+                            div().flex().justify_between().items_center().child(
                                 div()
                                     .flex()
-                                    .justify_between()
-                                    .items_center()
+                                    .flex_col()
                                     .child(
                                         div()
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .text_base()
-                                                    .text_color(rgb(0xcccccc))
-                                                    .child("Data Location"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(0x888888))
-                                                    .child("~/.local/share/adlib/"),
-                                            ),
+                                            .text_base()
+                                            .text_color(rgb(0xcccccc))
+                                            .child("Data Location"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0x888888))
+                                            .child("~/.local/share/adlib/"),
                                     ),
                             ),
+                        ),
                     ))
                     // About
                     .child(settings_section(
@@ -2736,7 +2809,9 @@ impl Adlib {
                                     .flex()
                                     .justify_between()
                                     .child(div().text_color(rgb(0x888888)).child("License"))
-                                    .child(div().text_color(rgb(0xcccccc)).child("MIT / Apache-2.0")),
+                                    .child(
+                                        div().text_color(rgb(0xcccccc)).child("MIT / Apache-2.0"),
+                                    ),
                             ),
                     )),
             )
@@ -2792,6 +2867,7 @@ fn setting_row(label: &str, description: &str, control: impl IntoElement) -> imp
         .child(control)
 }
 
+#[allow(dead_code)]
 fn model_option(name: &str, size: &str, is_selected: bool) -> impl IntoElement {
     let bg = if is_selected {
         rgb(0xe94560)
@@ -2856,7 +2932,10 @@ fn toggle_switch(is_on: bool) -> impl IntoElement {
 }
 
 fn language_dropdown(current: &Option<String>) -> impl IntoElement {
-    let display = current.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+    let display = current
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("Auto-detect");
 
     div()
         .px_3()

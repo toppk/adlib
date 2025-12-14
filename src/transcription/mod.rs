@@ -2,6 +2,8 @@
 //!
 //! Provides transcription of audio files using whisper-rs (whisper.cpp bindings).
 
+#![allow(dead_code)]
+
 use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -26,7 +28,7 @@ pub struct TranscriptionSegment {
 }
 
 /// Transcription options
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TranscriptionOptions {
     /// Language code (e.g., "en", "auto" for auto-detect)
     pub language: Option<String>,
@@ -34,16 +36,6 @@ pub struct TranscriptionOptions {
     pub translate: bool,
     /// Number of threads to use (0 = auto)
     pub n_threads: i32,
-}
-
-impl Default for TranscriptionOptions {
-    fn default() -> Self {
-        Self {
-            language: None, // auto-detect
-            translate: false,
-            n_threads: 0, // auto
-        }
-    }
 }
 
 /// Transcription engine wrapping whisper-rs
@@ -94,10 +86,13 @@ impl TranscriptionEngine {
         params.set_token_timestamps(true);
 
         // Create state and run transcription
-        let mut state = self.ctx.create_state()
+        let mut state = self
+            .ctx
+            .create_state()
             .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
-        state.full(params, samples)
+        state
+            .full(params, samples)
             .map_err(|e| format!("Transcription failed: {}", e))?;
 
         // Extract results
@@ -108,7 +103,8 @@ impl TranscriptionEngine {
 
         for i in 0..num_segments {
             if let Some(segment) = state.get_segment(i) {
-                let text = segment.to_str_lossy()
+                let text = segment
+                    .to_str_lossy()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|_| "[transcription error]".to_string());
                 let start_cs = segment.start_timestamp();
@@ -151,8 +147,8 @@ impl TranscriptionEngine {
 
 /// Load a WAV file and convert to 16kHz mono f32 samples
 fn load_wav_as_16khz_mono(path: &Path) -> Result<Vec<f32>, String> {
-    let reader = hound::WavReader::open(path)
-        .map_err(|e| format!("Failed to open WAV file: {}", e))?;
+    let reader =
+        hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV file: {}", e))?;
 
     let spec = reader.spec();
     let sample_rate = spec.sample_rate;
@@ -160,15 +156,15 @@ fn load_wav_as_16khz_mono(path: &Path) -> Result<Vec<f32>, String> {
 
     // Read samples based on format
     let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => {
-            reader.into_samples::<f32>()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| format!("Failed to read samples: {}", e))?
-        }
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read samples: {}", e))?,
         hound::SampleFormat::Int => {
             let bits = spec.bits_per_sample;
             let max_val = (1u32 << (bits - 1)) as f32;
-            reader.into_samples::<i32>()
+            reader
+                .into_samples::<i32>()
                 .map(|s| s.map(|v| v as f32 / max_val))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| format!("Failed to read samples: {}", e))?
@@ -252,7 +248,7 @@ impl LiveTranscriber {
     /// Maximum buffer size (30 seconds) - commit and clear if exceeded
     const MAX_BUFFER_SAMPLES: usize = 30 * 16000;
     /// Calibration duration in samples (1 second)
-    const CALIBRATION_SAMPLES: usize = 1 * 16000;
+    const CALIBRATION_SAMPLES: usize = 16000;
     /// Minimum VAD threshold (even in quiet rooms)
     const MIN_VAD_THRESHOLD: f32 = 0.02;
     /// Multiplier above ambient noise for VAD threshold
@@ -304,7 +300,8 @@ impl LiveTranscriber {
             let remaining = Self::CALIBRATION_SAMPLES - self.calibration_samples.len();
             if remaining > 0 {
                 let to_add = samples.len().min(remaining);
-                self.calibration_samples.extend_from_slice(&samples[..to_add]);
+                self.calibration_samples
+                    .extend_from_slice(&samples[..to_add]);
 
                 // Check if calibration is complete
                 if self.calibration_samples.len() >= Self::CALIBRATION_SAMPLES {
@@ -330,14 +327,16 @@ impl LiveTranscriber {
         self.vad_threshold = (ambient_rms * Self::VAD_MULTIPLIER).max(Self::MIN_VAD_THRESHOLD);
         self.calibrated = true;
         self.calibration_samples.clear(); // Free memory
-        eprintln!("VAD calibrated: ambient RMS = {:.4}, threshold = {:.4}", ambient_rms, self.vad_threshold);
+        eprintln!(
+            "VAD calibrated: ambient RMS = {:.4}, threshold = {:.4}",
+            ambient_rms, self.vad_threshold
+        );
     }
 
     /// Check if we have enough samples to process
     pub fn ready_to_process(&self) -> bool {
         self.calibrated && self.samples_since_last_process >= Self::STEP_SAMPLES
     }
-
 
     /// Calculate RMS (root mean square) of audio samples
     fn calculate_rms(samples: &[f32]) -> f32 {
@@ -356,36 +355,108 @@ impl LiveTranscriber {
         // Common hallucination patterns (all lowercase - we compare against lowercased text)
         let hallucination_patterns = [
             // Music and audio markers
-            "[music", "(music", "♪", "🎵", "[blank_audio]", "[silence",
-            "(silence", "[audio", "(audio",
+            "[music",
+            "(music",
+            "♪",
+            "🎵",
+            "[blank_audio]",
+            "[silence",
+            "(silence",
+            "[audio",
+            "(audio",
             // Non-speech sounds
-            "[sigh", "(sigh", "[crying", "(crying", "[laughter", "(laughter",
-            "[applause", "(applause", "[noise", "(noise",
-            "[inaudible", "(inaudible", "[unintelligible", "(unintelligible",
-            "[background", "(background", "[ambient", "(ambient",
-            "[static", "(static", "[breathing", "(breathing",
-            "[cough", "(cough", "[sneeze", "(sneeze",
-            "[whisper", "(whisper", "[mumbl", "(mumbl",
-            "[squeak", "(squeak", "[click", "(click",
-            "[beep", "(beep", "[tone", "(tone",
-            "[bell", "(bell", "[ring", "(ring",
+            "[sigh",
+            "(sigh",
+            "[crying",
+            "(crying",
+            "[laughter",
+            "(laughter",
+            "[applause",
+            "(applause",
+            "[noise",
+            "(noise",
+            "[inaudible",
+            "(inaudible",
+            "[unintelligible",
+            "(unintelligible",
+            "[background",
+            "(background",
+            "[ambient",
+            "(ambient",
+            "[static",
+            "(static",
+            "[breathing",
+            "(breathing",
+            "[cough",
+            "(cough",
+            "[sneeze",
+            "(sneeze",
+            "[whisper",
+            "(whisper",
+            "[mumbl",
+            "(mumbl",
+            "[squeak",
+            "(squeak",
+            "[click",
+            "(click",
+            "[beep",
+            "(beep",
+            "[tone",
+            "(tone",
+            "[bell",
+            "(bell",
+            "[ring",
+            "(ring",
             // Emotional/dramatic markers
-            "[dramatic", "(dramatic", "[sad", "(sad", "[happy", "(happy",
-            "[whistl", "(whistl", "[humm", "(humm",
-            "[mimick", "(mimick",
+            "[dramatic",
+            "(dramatic",
+            "[sad",
+            "(sad",
+            "[happy",
+            "(happy",
+            "[whistl",
+            "(whistl",
+            "[humm",
+            "(humm",
+            "[mimick",
+            "(mimick",
             // Foreign language markers
-            "[speaking", "(speaking", "[foreign", "(foreign",
+            "[speaking",
+            "(speaking",
+            "[foreign",
+            "(foreign",
             // Tech sounds
-            "[xbox", "(xbox", "[windows", "(windows",
+            "[xbox",
+            "(xbox",
+            "[windows",
+            "(windows",
             // Whisper garbage patterns
-            "...", "shh", "shhh", "hmm", "hush", "fash",
-            "shook", "whoosh", "air whoosh",
+            "...",
+            "shh",
+            "shhh",
+            "hmm",
+            "hush",
+            "fash",
+            "shook",
+            "whoosh",
+            "air whoosh",
             // Common false positives on silence - short phrases
-            "you are the only", "your house", "i'll show you",
-            "yet the few", "a few days", "and you have",
-            "thank you", "thanks for", "bye", "goodbye",
-            "i'm sorry", "sorry", "please come", "come forward",
-            "famous for", "you will be",
+            "you are the only",
+            "your house",
+            "i'll show you",
+            "yet the few",
+            "a few days",
+            "and you have",
+            "thank you",
+            "thanks for",
+            "bye",
+            "goodbye",
+            "i'm sorry",
+            "sorry",
+            "please come",
+            "come forward",
+            "famous for",
+            "you will be",
         ];
 
         for pattern in hallucination_patterns {
@@ -416,7 +487,9 @@ impl LiveTranscriber {
         let words: Vec<&str> = trimmed.split_whitespace().collect();
         if words.len() <= 3 {
             // Check if all words are common filler words
-            let filler_words = ["and", "the", "a", "an", "to", "of", "in", "is", "it", "you", "i"];
+            let filler_words = [
+                "and", "the", "a", "an", "to", "of", "in", "is", "it", "you", "i",
+            ];
             let filler_count = words.iter().filter(|w| filler_words.contains(w)).count();
             if filler_count == words.len() {
                 return true;
@@ -449,7 +522,8 @@ impl LiveTranscriber {
         if is_silence {
             self.silence_count += 1;
             // Commit current segment after silence threshold
-            if self.silence_count >= Self::SILENCE_COMMIT_THRESHOLD && !self.current_text.is_empty() {
+            if self.silence_count >= Self::SILENCE_COMMIT_THRESHOLD && !self.current_text.is_empty()
+            {
                 self.commit_segment();
                 return Ok(true);
             }
@@ -468,10 +542,13 @@ impl LiveTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
-        let mut state = self.ctx.create_state()
+        let mut state = self
+            .ctx
+            .create_state()
             .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
-        state.full(params, &self.buffer)
+        state
+            .full(params, &self.buffer)
             .map_err(|e| format!("Transcription failed: {}", e))?;
 
         // Extract text from all segments
@@ -480,7 +557,8 @@ impl LiveTranscriber {
 
         for i in 0..num_segments {
             if let Some(segment) = state.get_segment(i) {
-                let text = segment.to_str_lossy()
+                let text = segment
+                    .to_str_lossy()
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
@@ -498,7 +576,10 @@ impl LiveTranscriber {
         // Update current text if changed
         if !full_text.is_empty() && full_text != self.current_text {
             self.current_text = full_text;
-            eprintln!("[LIVE] '{}'", &self.current_text[..self.current_text.len().min(80)]);
+            eprintln!(
+                "[LIVE] '{}'",
+                &self.current_text[..self.current_text.len().min(80)]
+            );
             return Ok(true);
         }
 
@@ -508,9 +589,11 @@ impl LiveTranscriber {
     /// Commit current segment to committed text and start fresh
     fn commit_segment(&mut self) {
         if !self.current_text.is_empty() {
-            eprintln!("[COMMIT] '{}' ({} chars)",
-                     &self.current_text[..self.current_text.len().min(60)],
-                     self.current_text.len());
+            eprintln!(
+                "[COMMIT] '{}' ({} chars)",
+                &self.current_text[..self.current_text.len().min(60)],
+                self.current_text.len()
+            );
             if !self.committed_text.is_empty() {
                 self.committed_text.push_str("\n\n"); // Paragraph break between segments
             }

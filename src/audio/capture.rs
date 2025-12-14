@@ -2,6 +2,8 @@
 //!
 //! Provides microphone capture with real-time volume metering.
 
+#![allow(dead_code)]
+
 use pipewire as pw;
 use pw::spa;
 use pw::spa::param::format::{MediaSubtype, MediaType};
@@ -343,12 +345,10 @@ fn run_capture_loop(
 
     // Set up channel receiver to stop the loop
     let mainloop_weak = mainloop.downgrade();
-    let _receiver = receiver.attach(mainloop.loop_(), move |cmd| {
-        match cmd {
-            PipeWireCommand::Stop => {
-                if let Some(mainloop) = mainloop_weak.upgrade() {
-                    mainloop.quit();
-                }
+    let _receiver = receiver.attach(mainloop.loop_(), move |cmd| match cmd {
+        PipeWireCommand::Stop => {
+            if let Some(mainloop) = mainloop_weak.upgrade() {
+                mainloop.quit();
             }
         }
     });

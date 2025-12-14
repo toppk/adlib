@@ -2,6 +2,8 @@
 //!
 //! Records audio samples to WAV files in 16kHz mono format for Whisper compatibility.
 
+#![allow(dead_code)]
+
 use hound::{WavSpec, WavWriter};
 use std::fs::File;
 use std::io::BufWriter;
@@ -79,8 +81,7 @@ impl WavRecorder {
             None => self.generate_filename(),
         };
 
-        let file = File::create(&path)
-            .map_err(|e| format!("Failed to create file: {}", e))?;
+        let file = File::create(&path).map_err(|e| format!("Failed to create file: {}", e))?;
 
         let writer = BufWriter::new(file);
         let mut wav_writer = WavWriter::new(writer, self.spec)
@@ -110,9 +111,7 @@ impl WavRecorder {
         let sample_rate = spec.sample_rate;
 
         let samples: Result<Vec<f32>, _> = match spec.sample_format {
-            hound::SampleFormat::Float => reader
-                .into_samples::<f32>()
-                .collect(),
+            hound::SampleFormat::Float => reader.into_samples::<f32>().collect(),
             hound::SampleFormat::Int => {
                 // Convert integer samples to float
                 let bits = spec.bits_per_sample;

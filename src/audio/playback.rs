@@ -2,6 +2,8 @@
 //!
 //! Provides audio playback with real-time position tracking and waveform data.
 
+#![allow(dead_code)]
+
 use pipewire as pw;
 use pw::spa;
 use pw::spa::param::format::{MediaSubtype, MediaType};
@@ -285,12 +287,10 @@ fn run_playback_loop(
 
     // Set up channel receiver to stop the loop
     let mainloop_weak = mainloop.downgrade();
-    let _receiver = receiver.attach(mainloop.loop_(), move |cmd| {
-        match cmd {
-            PlaybackCommand::Stop => {
-                if let Some(mainloop) = mainloop_weak.upgrade() {
-                    mainloop.quit();
-                }
+    let _receiver = receiver.attach(mainloop.loop_(), move |cmd| match cmd {
+        PlaybackCommand::Stop => {
+            if let Some(mainloop) = mainloop_weak.upgrade() {
+                mainloop.quit();
             }
         }
     });

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -48,8 +50,9 @@ pub struct Segment {
 }
 
 /// Status of a transcription job
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum TranscriptionStatus {
+    #[default]
     NotStarted,
     Loading,
     Progress(f64), // progress fraction 0.0-1.0
@@ -57,12 +60,6 @@ pub enum TranscriptionStatus {
     Canceled,
     Error(String),
     Paused,
-}
-
-impl Default for TranscriptionStatus {
-    fn default() -> Self {
-        Self::NotStarted
-    }
 }
 
 /// A transcription result

@@ -5,4 +5,4 @@
 
 mod manager;
 
-pub use manager::{ModelManager, ModelState, ProgressTracker, WhisperModel};
+pub use manager::{ModelManager, ProgressTracker, WhisperModel};
