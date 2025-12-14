@@ -31,6 +31,7 @@ class RootState:
   2. `Recording` reducer starts audio capture; if live mode is enabled, loads model and starts live transcription loop concurrently.
   3. Pause toggles audio engine pause; resume restarts; cancel deletes the partially recorded file.
   4. Save stops capture, marks any live transcription status as done, and emits delegate event to insert into the recording list.
+- Visuals: record button uses glowing gradients; waveform is a dense striped live canvas fed by `waveSamples` (relative energy). The display is cosmetic—data source is the relative-energy array; style can be swapped in the desktop port as long as it reflects live amplitude.
 
 ## Recording List Screen
 - Displays cards for each `RecordingInfo` (sorted by date).

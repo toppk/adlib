@@ -225,23 +225,79 @@ impl Adlib {
                             }),
                     )
                     .child(
+                        // Waveform / Volume meter display
                         div()
                             .w(px(400.0))
-                            .h(px(100.0))
+                            .h(px(120.0))
                             .bg(rgb(0x1a1a2e))
                             .rounded_lg()
                             .border_1()
                             .border_color(rgb(0x2d2d44))
                             .flex()
+                            .flex_col()
                             .items_center()
                             .justify_center()
-                            .child(
-                                div().text_color(rgb(0x666666)).child(if is_recording {
-                                    "Waveform visualization"
-                                } else {
-                                    "Audio waveform will appear here"
-                                }),
-                            ),
+                            .gap_2()
+                            .when(!is_recording, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(rgb(0x666666))
+                                        .text_sm()
+                                        .child("Audio waveform will appear here"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(0x444444))
+                                        .text_xs()
+                                        .child("Press Record or Space to start"),
+                                )
+                            })
+                            .when(is_recording, |el| {
+                                // Volume meter bars
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_end()
+                                        .justify_center()
+                                        .gap_1()
+                                        .h(px(60.0))
+                                        .children((0..32).map(|i| {
+                                            // Create animated bars - simulated waveform
+                                            // In a real implementation, these would be driven by audio samples
+                                            let height = if is_paused {
+                                                5.0
+                                            } else {
+                                                // Simulate varying heights based on position
+                                                let base = ((i as f32 - 16.0).abs() / 16.0) * 40.0;
+                                                let variation = ((i * 7) % 20) as f32;
+                                                (60.0 - base + variation).max(5.0)
+                                            };
+                                            div()
+                                                .w(px(8.0))
+                                                .h(px(height))
+                                                .rounded_sm()
+                                                .bg(if is_paused {
+                                                    rgb(0x444444)
+                                                } else if height > 45.0 {
+                                                    rgb(0xe94560) // High level - red
+                                                } else if height > 30.0 {
+                                                    rgb(0xFF9800) // Medium - orange
+                                                } else {
+                                                    rgb(0x4CAF50) // Low - green
+                                                })
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(0x888888))
+                                        .text_xs()
+                                        .child(if is_paused {
+                                            "Paused - Click Resume to continue"
+                                        } else {
+                                            "Recording... Speak into your microphone"
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         div()

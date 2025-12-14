@@ -4,7 +4,7 @@
 
 ### System Dependencies
 
-Adlib uses GPUI (Zed's GPU-accelerated UI framework) which requires the following system libraries:
+Adlib uses GPUI (Zed's GPU-accelerated UI framework) and PipeWire for audio capture, which require the following system libraries:
 
 **Fedora/RHEL:**
 ```bash
@@ -12,7 +12,8 @@ sudo dnf install -y \
     freetype-devel \
     libxcb-devel \
     libxkbcommon-devel \
-    libxkbcommon-x11-devel
+    libxkbcommon-x11-devel \
+    pipewire-devel
 ```
 
 **Ubuntu/Debian:**
@@ -21,7 +22,8 @@ sudo apt install -y \
     libfreetype-dev \
     libxcb1-dev \
     libxkbcommon-dev \
-    libxkbcommon-x11-dev
+    libxkbcommon-x11-dev \
+    libpipewire-0.3-dev
 ```
 
 ### Rust Toolchain
@@ -52,12 +54,19 @@ adlib/
 │   ├── main.rs          # Application entry point
 │   ├── app.rs           # Main GPUI application component with all views
 │   ├── models.rs        # Domain models (Recording, Transcription, Settings)
+│   ├── audio/
+│   │   ├── mod.rs       # Audio module exports
+│   │   ├── capture.rs   # PipeWire audio capture with volume metering
+│   │   └── recorder.rs  # WAV file recording via hound
 │   └── state/
 │       ├── mod.rs       # State module exports
 │       └── app_state.rs # Application state management
 ├── docs/
 │   └── DEVELOPMENT.md   # This file
+├── icons/               # Application icons (hicolor theme)
 ├── specifications/      # Feature specifications
+├── com.adlib.VoiceRecorder.desktop  # Desktop entry file
+├── adlib-icon.png       # Original high-res icon (1024x1024)
 ├── Cargo.toml           # Rust dependencies
 ├── CLAUDE.md            # AI development guidelines
 ├── LICENSE-MIT          # MIT License
@@ -74,6 +83,14 @@ Adlib uses GPUI, the GPU-accelerated UI framework from the Zed editor. Key conce
 - **Styled trait**: Common styling methods like `flex()`, `bg()`, `p_4()`, etc.
 - **InteractiveElement trait**: Event handlers like `on_click()`, `on_hover()`
 - **StatefulInteractiveElement trait**: Scroll handling requires `.id("...")` to create a stateful element
+
+### Audio Pipeline
+
+Audio capture uses PipeWire for low-latency microphone access:
+
+- `AudioCapture`: Manages PipeWire stream in a background thread
+- `SharedCaptureState`: Thread-safe state with volume levels and waveform data
+- `WavRecorder`: Saves captured audio to 16kHz mono WAV files (Whisper-compatible)
 
 ### State Management
 
@@ -97,6 +114,25 @@ The application has four main views:
 - Sidebar navigation for switching between views
 - Keyboard shortcuts: F1 (help), Space (record), Ctrl+1/2/3 (views)
 - Help overlay accessible via F1
+
+## Desktop Integration
+
+### Installing the Desktop Entry
+
+```bash
+# Install the desktop file
+cp com.adlib.VoiceRecorder.desktop ~/.local/share/applications/
+
+# Install icons
+cp -r icons/hicolor/* ~/.local/share/icons/hicolor/
+
+# Update icon cache
+gtk-update-icon-cache ~/.local/share/icons/hicolor
+```
+
+### App ID for Wayland
+
+The application uses `com.adlib.VoiceRecorder` as its app ID for Wayland/GNOME integration. This matches the `.desktop` file name for proper taskbar icon association.
 
 ## Common Tasks
 
@@ -152,11 +188,23 @@ The Vulkan warning `"radv is not a conformant Vulkan implementation"` is expecte
 
 For debugging GPUI layouts, you can use the built-in inspector (if enabled).
 
+## Key Dependencies
+
+- **gpui**: GPU-accelerated UI framework from Zed
+- **pipewire**: Low-latency audio capture
+- **hound**: WAV file reading/writing
+- **hf-hub**: Hugging Face model downloading
+- **tokio**: Async runtime for background tasks
+- **serde/serde_json**: Serialization for settings and recordings
+- **chrono**: Date/time handling
+- **uuid**: Unique identifiers for recordings
+
 ## Future Development
 
-Areas for implementation:
-- Audio capture using ALSA/PulseAudio/PipeWire
-- Whisper model integration for transcription
+Upcoming implementation areas:
+- Wire up PipeWire capture to UI (currently has visual placeholder)
+- Whisper model download from Hugging Face
+- Whisper transcription integration
 - File persistence for recordings and settings
 - Export functionality (text, audio formats)
-- Cloud sync support
+- Live transcription mode

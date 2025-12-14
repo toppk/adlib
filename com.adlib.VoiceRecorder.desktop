@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Adlib
+GenericName=Voice Recorder
+Comment=Voice recorder and transcription application
+Exec=/home/toppk/workspace/adlib/target/debug/adlib
+Icon=com.adlib.VoiceRecorder
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+Keywords=voice;recorder;transcription;whisper;audio;
+
+# For Wayland/GNOME integration
+StartupWMClass=com.adlib.VoiceRecorder
+
+# Actions
+Actions=new-recording;
+
+[Desktop Action new-recording]
+Name=New Recording
+Exec=/home/toppk/workspace/adlib/target/debug/adlib --record
