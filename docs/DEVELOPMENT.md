@@ -51,26 +51,33 @@ cargo run
 ```
 adlib/
 ├── src/
-│   ├── main.rs          # Application entry point
-│   ├── app.rs           # Main GPUI application component with all views
-│   ├── models.rs        # Domain models (Recording, Transcription, Settings)
+│   ├── main.rs            # Application entry point
+│   ├── app.rs             # Main GPUI application component with all views
+│   ├── models.rs          # Domain models (Recording, Transcription, Settings)
 │   ├── audio/
-│   │   ├── mod.rs       # Audio module exports
-│   │   ├── capture.rs   # PipeWire audio capture with volume metering
-│   │   └── recorder.rs  # WAV file recording via hound
-│   └── state/
-│       ├── mod.rs       # State module exports
-│       └── app_state.rs # Application state management
+│   │   ├── mod.rs         # Audio module exports
+│   │   ├── capture.rs     # PipeWire audio capture with volume metering
+│   │   ├── playback.rs    # PipeWire audio playback
+│   │   └── recorder.rs    # WAV file recording via hound
+│   ├── state/
+│   │   ├── mod.rs         # State module exports
+│   │   ├── app_state.rs   # Application state management
+│   │   └── database.rs    # JSON persistence for recordings
+│   ├── transcription/
+│   │   └── mod.rs         # Whisper transcription (file + live)
+│   └── whisper/
+│       └── manager.rs     # Model download and management
 ├── docs/
-│   └── DEVELOPMENT.md   # This file
-├── icons/               # Application icons (hicolor theme)
-├── specifications/      # Feature specifications
+│   ├── DEVELOPMENT.md     # This file
+│   ├── ARCHITECTURE.md    # Technical architecture
+│   └── FUTURE.md          # Roadmap and ideas
+├── icons/                 # Application icons (hicolor theme)
+├── specifications/        # Feature specifications
 ├── com.adlib.VoiceRecorder.desktop  # Desktop entry file
-├── adlib-icon.png       # Original high-res icon (1024x1024)
-├── Cargo.toml           # Rust dependencies
-├── CLAUDE.md            # AI development guidelines
-├── LICENSE-MIT          # MIT License
-└── LICENSE-APACHE       # Apache 2.0 License
+├── Cargo.toml             # Rust dependencies
+├── CLAUDE.md              # AI development guidelines
+├── LICENSE-MIT            # MIT License
+└── LICENSE-APACHE         # Apache 2.0 License
 ```
 
 ## Architecture
@@ -102,12 +109,13 @@ The application uses a unidirectional data flow pattern:
 
 ### Views
 
-The application has four main views:
+The application has five main views:
 
-1. **Record Screen** (`ActiveView::Record`): Voice recording interface with waveform visualization
-2. **Recording List** (`ActiveView::RecordingList`): Browse and manage recordings
-3. **Recording Details** (`ActiveView::RecordingDetails`): Playback and transcription view
-4. **Settings** (`ActiveView::Settings`): Model selection and preferences
+1. **Live Transcription** (`ActiveView::Live`): Real-time speech-to-text without saving
+2. **Record Screen** (`ActiveView::Record`): Voice recording interface with waveform visualization
+3. **Recording List** (`ActiveView::RecordingList`): Browse and manage recordings
+4. **Recording Details** (`ActiveView::RecordingDetails`): Playback and transcription view
+5. **Settings** (`ActiveView::Settings`): Model selection and preferences
 
 ### Navigation
 
@@ -199,12 +207,7 @@ For debugging GPUI layouts, you can use the built-in inspector (if enabled).
 - **chrono**: Date/time handling
 - **uuid**: Unique identifiers for recordings
 
-## Future Development
+## Related Documentation
 
-Upcoming implementation areas:
-- Wire up PipeWire capture to UI (currently has visual placeholder)
-- Whisper model download from Hugging Face
-- Whisper transcription integration
-- File persistence for recordings and settings
-- Export functionality (text, audio formats)
-- Live transcription mode
+- [Architecture](ARCHITECTURE.md) - Technical overview and design decisions
+- [Future Roadmap](FUTURE.md) - Planned features and ideas
