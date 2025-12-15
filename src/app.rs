@@ -646,7 +646,7 @@ impl Render for Adlib {
             .flex_col()
             .bg(rgb(0x0f0f1a))
             .key_context("Adlib")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, _cx| {
                 match event.keystroke.key.as_str() {
                     "f1" => {
                         this.state.toggle_help();
@@ -690,7 +690,9 @@ impl Render for Adlib {
                             this.state.stop_recording(file_name);
                             this.save_recordings_to_db();
                         }
-                        window.remove_window();
+                        // Graceful shutdown and quit
+                        this.shutdown();
+                        _cx.quit();
                     }
                     _ => {}
                 }
@@ -742,7 +744,7 @@ impl Render for Adlib {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0xe81123)))
-                            .on_click(cx.listener(|this, _, window, _cx| {
+                            .on_click(cx.listener(|this, _, _window, cx| {
                                 // If recording, save first before closing
                                 if this.state.record_screen.is_recording {
                                     let saved_path = this.stop_audio_capture();
@@ -754,7 +756,8 @@ impl Render for Adlib {
                                 }
                                 // Graceful shutdown - stop all async tasks before closing
                                 this.shutdown();
-                                window.remove_window();
+                                // Properly quit the application
+                                cx.quit();
                             }))
                             .child(div().text_lg().text_color(rgb(0xcccccc)).child("×")),
                     ),
@@ -1012,25 +1015,33 @@ impl Render for Adlib {
 impl Adlib {
     /// Start live transcription
     fn start_live_transcription(&mut self, cx: &mut Context<Self>) {
-        // Check if a model is available
+        // Get the selected model (require explicit selection, same as recording transcription)
+        let selected_model_name = self.state.settings.selected_model_name.clone();
+        if selected_model_name.is_empty() {
+            self.live_error = Some(
+                "No model selected. Go to Settings to download and select a model.".to_string(),
+            );
+            return;
+        }
+
+        // Find the model and check if it's downloaded
+        let model = WhisperModel::from_short_name(&selected_model_name);
+        let Some(model) = model else {
+            self.live_error = Some("Selected model not found.".to_string());
+            return;
+        };
+
+        // Get the model path
         let model_path = {
             let manager = self.model_manager.lock().unwrap();
-            // Try to find any downloaded model, preferring the selected one
-            let selected = WhisperModel::from_short_name(&self.state.settings.selected_model_name)
-                .unwrap_or(WhisperModel::Tiny);
-            if let Some(path) = manager.get_cached_model_path(selected) {
-                Some(path)
-            } else {
-                // Try to find any downloaded model
-                WhisperModel::all()
-                    .iter()
-                    .find_map(|&m| manager.get_cached_model_path(m))
-            }
+            manager.get_cached_model_path(model)
         };
 
         let Some(model_path) = model_path else {
-            self.live_error =
-                Some("No model downloaded. Go to Settings to download a model.".to_string());
+            self.live_error = Some(format!(
+                "Model {} is not downloaded. Go to Settings to download it.",
+                model.display_name()
+            ));
             return;
         };
 
@@ -1281,12 +1292,17 @@ impl Adlib {
             })
             .unwrap_or((false, 0.0));
 
-        // Check if a model is available
+        // Check if a model is selected AND downloaded
         let has_model = {
-            let manager = self.model_manager.lock().unwrap();
-            WhisperModel::all()
-                .iter()
-                .any(|&m| manager.is_model_downloaded(m))
+            let selected_name = &self.state.settings.selected_model_name;
+            if selected_name.is_empty() {
+                false
+            } else if let Some(model) = WhisperModel::from_short_name(selected_name) {
+                let manager = self.model_manager.lock().unwrap();
+                manager.is_model_downloaded(model)
+            } else {
+                false
+            }
         };
 
         let format_duration = |secs: f64| {
@@ -1349,7 +1365,7 @@ impl Adlib {
                                 .rounded_lg()
                                 .text_color(rgb(0xffa500))
                                 .text_sm()
-                                .child("No model downloaded. Go to Settings to download a Whisper model first."),
+                                .child("No model selected. Go to Settings to download and select a Whisper model."),
                         ),
                 )
             })
@@ -2544,13 +2560,13 @@ impl Adlib {
                                         .text_color(rgb(0xffffff)),
                                 )
                             })
-                            // Queued state - dashed circle
+                            // Queued state - dashed circle (muted orange, shade below downloading)
                             .when(is_queued && !is_downloading, |el| {
                                 el.bg(rgb(0x2d2d44)).child(
                                     Icon::default()
                                         .path("icons/circle-dot-dashed.svg")
                                         .small()
-                                        .text_color(rgb(0x888888)),
+                                        .text_color(rgb(0xCC8800)),
                                 )
                             })
                             // Download button (not downloaded, not queued)
