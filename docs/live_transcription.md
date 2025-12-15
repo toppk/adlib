@@ -408,7 +408,7 @@ So between the two log lines, the buffer contained the SAME audio plus MORE. Yet
 
 **Status**: Unresolved. The issue occurs intermittently during long continuous speech without natural pauses. Adding pauses in speech allows PAUSE commits which reset the buffer, avoiding the problem.
 
-### Whisper State Recreation Overhead (Fixed in commit TBD)
+### Whisper State Recreation Overhead (Fixed)
 
 **Problem**: Every transcription call was creating a new `WhisperState`, causing massive GPU initialization overhead:
 
@@ -432,6 +432,8 @@ state.full(params, buffer)?;
 ```
 
 **Fix**: Create `WhisperState` once in `LiveTranscriber::new()` and store it in the struct. Reuse for all transcriptions.
+
+**Status**: Fixed. The `WhisperState` is now created once during `LiveTranscriber` initialization and stored as a field. The `transcribe_buffer()` method reuses this state for all transcription calls, eliminating the repeated GPU buffer allocations.
 
 ### Debug Feature: WAV Capture for Analysis
 

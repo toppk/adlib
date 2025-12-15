@@ -6,7 +6,7 @@
 
 use log::{debug, info};
 use std::path::Path;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 /// Result of a transcription
 #[derive(Debug, Clone)]
@@ -224,7 +224,11 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// Unlike a rolling window, this transcribes ALL accumulated audio each cycle,
 /// so no speech is lost. Text updates/corrects as more audio arrives.
 pub struct LiveTranscriber {
+    /// Whisper context (needed to keep state alive)
+    #[allow(dead_code)]
     ctx: WhisperContext,
+    /// Whisper state - created once and reused to avoid GPU buffer recreation
+    state: WhisperState,
     /// All accumulated audio samples for current segment
     buffer: Vec<f32>,
     samples_since_last_process: usize,
@@ -276,8 +280,14 @@ impl LiveTranscriber {
         )
         .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
 
+        // Create state once - will be reused for all transcriptions
+        let state = ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
+
         Ok(Self {
             ctx,
+            state,
             buffer: Vec::with_capacity(Self::MAX_BUFFER_SAMPLES),
             samples_since_last_process: 0,
             committed_text: String::new(),
@@ -556,7 +566,9 @@ impl LiveTranscriber {
                 self.buffer.len() as f64 / Self::SAMPLE_RATE as f64
             );
             // Transcribe what we have and commit
-            if let Ok(Some(text)) = self.transcribe_buffer(&self.buffer) {
+            // Clone buffer to avoid borrow conflict with transcribe_buffer's &mut self
+            let buffer_copy = self.buffer.clone();
+            if let Ok(Some(text)) = self.transcribe_buffer(&buffer_copy) {
                 self.current_text = text;
             }
             if !self.current_text.is_empty() {
@@ -603,8 +615,9 @@ impl LiveTranscriber {
                         self.buffer.len() - speech_end
                     );
                     // Run final authoritative transcription on just the speech portion
-                    if let Ok(Some(final_text)) = self.transcribe_buffer(&self.buffer[..speech_end])
-                    {
+                    // Clone to avoid borrow conflict with transcribe_buffer's &mut self
+                    let speech_buffer: Vec<f32> = self.buffer[..speech_end].to_vec();
+                    if let Ok(Some(final_text)) = self.transcribe_buffer(&speech_buffer) {
                         self.current_text = final_text;
                     }
                 }
@@ -631,7 +644,9 @@ impl LiveTranscriber {
         self.silence_count = 0;
 
         // Transcribe ALL accumulated audio for live feedback
-        if let Ok(Some(text)) = self.transcribe_buffer(&self.buffer) {
+        // Clone buffer to avoid borrow conflict with transcribe_buffer's &mut self
+        let buffer_copy = self.buffer.clone();
+        if let Ok(Some(text)) = self.transcribe_buffer(&buffer_copy) {
             self.current_text = text;
             debug!("[LIVE] '{}'", self.current_text);
             return Ok(true);
@@ -641,7 +656,8 @@ impl LiveTranscriber {
     }
 
     /// Transcribe a buffer and return the text (None if empty/hallucination)
-    fn transcribe_buffer(&self, buffer: &[f32]) -> Result<Option<String>, String> {
+    /// Reuses the stored WhisperState to avoid GPU buffer recreation
+    fn transcribe_buffer(&mut self, buffer: &[f32]) -> Result<Option<String>, String> {
         if buffer.is_empty() {
             return Ok(None);
         }
@@ -654,21 +670,17 @@ impl LiveTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
-
-        state
+        // Use the stored state - avoids recreating GPU buffers on every call
+        self.state
             .full(params, buffer)
             .map_err(|e| format!("Transcription failed: {}", e))?;
 
         // Extract text from all segments
-        let num_segments = state.full_n_segments();
+        let num_segments = self.state.full_n_segments();
         let mut full_text = String::new();
 
         for i in 0..num_segments {
-            if let Some(segment) = state.get_segment(i) {
+            if let Some(segment) = self.state.get_segment(i) {
                 let text = segment
                     .to_str_lossy()
                     .map(|s| s.to_string())
