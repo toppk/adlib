@@ -334,6 +334,80 @@ cargo run -- -vv
 [COMMIT] 'Hello, world.' (13 chars)
 ```
 
+## Open Issues
+
+### Whisper Context Loss During Long Utterances
+
+**Problem**: During continuous speech without pauses, Whisper can suddenly "forget" the beginning of the utterance and output only the recent portion.
+
+**Observed behavior**:
+```
+[06:27:18.768] [LIVE] 'And again, I'm saying something new now.'
+[06:27:21.097] [LIVE] 'It's so.'
+```
+
+The text went from 40 characters to 8 characters - a complete loss of the beginning. The user said "And again, I'm saying something new now and it's so perfect" but only "It's so." was captured.
+
+**Root cause analysis**:
+
+The issue stems from the blocking architecture in the processing loop:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Processing Loop (app.rs)                                    │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Sleep 100ms                                              │
+│ 2. Fetch ALL new samples from capture_state                 │
+│ 3. Add samples to transcriber buffer                        │
+│ 4. If ready: spawn Whisper and .await (BLOCKS HERE)         │
+│    └── While blocked, audio accumulates in capture_state    │
+│ 5. Loop back to step 1                                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+When Whisper takes a long time to process (e.g., 2+ seconds for a long buffer):
+1. The loop blocks at `.await`
+2. PipeWire continues capturing audio into `capture_state`
+3. When Whisper finishes, ALL accumulated audio is added at once
+4. Buffer grows by 2+ seconds in a single spike
+5. Next transcription has a much larger buffer
+6. Whisper may lose context on the older audio
+
+**Why the buffer matters**:
+
+The buffer is always growing (never truncated during live transcription):
+```rust
+// add_samples() - always extends
+self.buffer.extend_from_slice(samples);
+
+// Only commit_segment() clears the buffer
+fn commit_segment(&mut self) {
+    ...
+    self.buffer.clear();
+}
+```
+
+So between the two log lines, the buffer contained the SAME audio plus MORE. Yet Whisper's output completely changed, suggesting Whisper's internal context handling couldn't cope with the longer audio.
+
+**Potential causes**:
+1. **Whisper context window overflow**: Whisper has internal limits on how much audio it can process coherently
+2. **Spiky buffer growth**: Adding 2+ seconds of audio at once (vs. smooth 100ms increments) may affect Whisper's progressive processing
+3. **Audio quality degradation**: Possibly unrelated audio artifacts in the accumulated samples
+
+**Potential solutions** (not yet implemented):
+
+1. **Non-blocking Whisper**: Run Whisper in a separate thread that doesn't block sample accumulation. Samples are added continuously while Whisper processes in parallel.
+
+2. **Shorter force-commit threshold**: Reduce `MAX_BUFFER_SAMPLES` from 30s to 10-15s to commit before Whisper loses context.
+
+3. **Sliding window transcription**: Only transcribe the last N seconds for live display, keeping full buffer for final PAUSE transcription.
+
+4. **Content loss detection**: If new transcription is significantly shorter than previous (>50% loss), preserve the old text. (Attempted but reverted as it's a band-aid, not a fix.)
+
+5. **Double-buffering**: Maintain two buffers - one for Whisper processing, one for accumulating new samples. Swap when processing completes.
+
+**Status**: Unresolved. The issue occurs intermittently during long continuous speech without natural pauses. Adding pauses in speech allows PAUSE commits which reset the buffer, avoiding the problem.
+
 ## References
 
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) - C++ Whisper implementation
