@@ -536,6 +536,7 @@ impl Adlib {
         self.transcription_status = Some("Loading model...".to_string());
 
         let file_name_clone = file_name.to_string();
+        let use_gpu = self.state.settings.is_using_gpu;
 
         // Spawn transcription task
         cx.spawn({
@@ -555,8 +556,8 @@ impl Adlib {
                         let model_path = model_path.clone();
                         let wav_path = wav_path.clone();
                         async move {
-                            // Load the model
-                            let engine = TranscriptionEngine::new(&model_path)?;
+                            // Load the model (with GPU if enabled)
+                            let engine = TranscriptionEngine::new(&model_path, use_gpu)?;
 
                             // Transcribe the file
                             let options = TranscriptionOptions::default();
@@ -1045,8 +1046,9 @@ impl Adlib {
             return;
         };
 
-        // Create the live transcriber
-        match LiveTranscriber::new(&model_path) {
+        // Create the live transcriber (with GPU if enabled)
+        let use_gpu = self.state.settings.is_using_gpu;
+        match LiveTranscriber::new(&model_path, use_gpu) {
             Ok(transcriber) => {
                 self.live_transcriber = Some(Arc::new(Mutex::new(transcriber)));
                 self.live_error = None;

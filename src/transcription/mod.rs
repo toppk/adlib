@@ -46,8 +46,9 @@ pub struct TranscriptionEngine {
 
 impl TranscriptionEngine {
     /// Create a new transcription engine by loading a model
-    pub fn new(model_path: &Path) -> Result<Self, String> {
-        let ctx_params = WhisperContextParameters::default();
+    pub fn new(model_path: &Path, use_gpu: bool) -> Result<Self, String> {
+        let mut ctx_params = WhisperContextParameters::default();
+        ctx_params.use_gpu(use_gpu);
 
         let ctx = WhisperContext::new_with_params(
             model_path.to_str().ok_or("Invalid model path")?,
@@ -265,8 +266,9 @@ impl LiveTranscriber {
     const SILENCE_COMMIT_THRESHOLD: usize = 3;
 
     /// Create a new live transcriber with a model
-    pub fn new(model_path: &Path) -> Result<Self, String> {
-        let ctx_params = WhisperContextParameters::default();
+    pub fn new(model_path: &Path, use_gpu: bool) -> Result<Self, String> {
+        let mut ctx_params = WhisperContextParameters::default();
+        ctx_params.use_gpu(use_gpu);
 
         let ctx = WhisperContext::new_with_params(
             model_path.to_str().ok_or("Invalid model path")?,
