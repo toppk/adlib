@@ -151,6 +151,7 @@ pub struct Settings {
     pub is_using_gpu: bool,
     pub is_vad_enabled: bool,
     pub is_live_transcription_enabled: bool,
+    pub confirm_on_delete: bool,
 }
 
 impl Default for Settings {
@@ -161,6 +162,7 @@ impl Default for Settings {
             is_using_gpu: false,
             is_vad_enabled: false,
             is_live_transcription_enabled: false,
+            confirm_on_delete: true,
         }
     }
 }

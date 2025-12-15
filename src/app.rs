@@ -57,6 +57,8 @@ pub struct Adlib {
     live_error: Option<String>,
     /// Show delete all models confirmation dialog
     show_delete_all_confirmation: bool,
+    /// Show delete recording confirmation dialog
+    show_delete_recording_confirmation: bool,
 }
 
 impl Adlib {
@@ -79,6 +81,7 @@ impl Adlib {
             state.settings.selected_model_name = model_name;
         }
         state.settings.is_using_gpu = crate::settings::get_use_gpu();
+        state.settings.confirm_on_delete = crate::settings::get_confirm_on_delete();
 
         let audio_capture = AudioCapture::new();
         let capture_state = audio_capture.shared_state();
@@ -119,6 +122,7 @@ impl Adlib {
             live_duration: 0.0,
             live_error: None,
             show_delete_all_confirmation: false,
+            show_delete_recording_confirmation: false,
         }
     }
 
@@ -478,6 +482,37 @@ impl Adlib {
         } else {
             self.state.settings.selected_model_name = String::new();
             crate::settings::set_selected_model("");
+        }
+    }
+
+    /// Delete a recording and its audio file
+    fn delete_recording(&mut self, file_name: &str) {
+        // Find and remove the recording from state
+        if let Some(pos) = self
+            .state
+            .recordings
+            .iter()
+            .position(|r| r.file_name == file_name)
+        {
+            self.state.recordings.remove(pos);
+
+            // Delete the audio file from disk
+            if let Some(data_dir) = dirs::data_local_dir() {
+                let audio_path = data_dir.join("adlib").join(file_name);
+                if audio_path.exists() {
+                    if let Err(e) = std::fs::remove_file(&audio_path) {
+                        error!("Failed to delete audio file {}: {}", file_name, e);
+                    }
+                }
+            }
+
+            // Save the updated recordings database
+            self.save_recordings_to_db();
+
+            // Reset dialog state and return to list view
+            self.show_delete_recording_confirmation = false;
+            self.state.selected_recording = None;
+            self.state.active_view = ActiveView::RecordingList;
         }
     }
 
@@ -2384,6 +2419,10 @@ impl Adlib {
                         let is_transcribing = self.transcribing_file.as_ref() == Some(&file_name);
                         let transcription_status = self.transcription_status.clone();
                         let file_name_for_transcribe = file_name.clone();
+                        let file_name_for_delete = file_name.clone();
+                        let file_name_for_confirm = file_name.clone();
+                        let show_delete_confirmation = self.show_delete_recording_confirmation;
+                        let confirm_on_delete = self.state.settings.confirm_on_delete;
 
                         div()
                             .px_6()
@@ -2446,19 +2485,80 @@ impl Adlib {
                                             .child("Export Audio"),
                                     )
                                     .child(div().flex_grow())
-                                    .child(
-                                        div()
-                                            .id("delete-btn")
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_md()
-                                            .bg(rgb(0xf44336))
-                                            .text_sm()
-                                            .text_color(rgb(0xffffff))
-                                            .cursor_pointer()
-                                            .hover(|style| style.opacity(0.9))
-                                            .child("Delete"),
-                                    ),
+                                    // Delete button or inline confirmation
+                                    .when(!show_delete_confirmation, |el| {
+                                        el.child(
+                                            div()
+                                                .id("delete-btn")
+                                                .px_4()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(rgb(0xf44336))
+                                                .text_sm()
+                                                .text_color(rgb(0xffffff))
+                                                .cursor_pointer()
+                                                .hover(|style| style.opacity(0.9))
+                                                .on_click(cx.listener(move |this, _, _w, cx| {
+                                                    if confirm_on_delete {
+                                                        this.show_delete_recording_confirmation = true;
+                                                        cx.notify();
+                                                    } else {
+                                                        this.delete_recording(&file_name_for_delete);
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("Delete"),
+                                        )
+                                    })
+                                    .when(show_delete_confirmation, |el| {
+                                        let file_name_confirm = file_name_for_confirm.clone();
+                                        el.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0xf44336))
+                                                        .child("Are you sure?"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("confirm-delete-recording")
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .bg(rgb(0xf44336))
+                                                        .text_xs()
+                                                        .text_color(rgb(0xffffff))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.opacity(0.8))
+                                                        .on_click(cx.listener(move |this, _, _w, cx| {
+                                                            this.delete_recording(&file_name_confirm);
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Yes, Delete"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("cancel-delete-recording")
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .bg(rgb(0x2d2d44))
+                                                        .text_xs()
+                                                        .text_color(rgb(0xcccccc))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.bg(rgb(0x3d3d54)))
+                                                        .on_click(cx.listener(|this, _, _w, cx| {
+                                                            this.show_delete_recording_confirmation = false;
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Cancel"),
+                                                ),
+                                        )
+                                    }),
                             )
                     })
             }
@@ -2613,6 +2713,7 @@ impl Adlib {
         let is_live = self.state.settings.is_live_transcription_enabled;
         let should_translate = self.state.settings.parameters.should_translate;
         let language = self.state.settings.parameters.language.clone();
+        let confirm_delete = self.state.settings.confirm_on_delete;
 
         // Get all recommended models
         let all_models: Vec<WhisperModel> = WhisperModel::recommended().to_vec();
@@ -2888,25 +2989,68 @@ impl Adlib {
                     // Storage
                     .child(settings_section(
                         "Storage",
-                        div().flex().flex_col().gap_3().child(
-                            div().flex().justify_between().items_center().child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_base()
-                                            .text_color(rgb(0xcccccc))
-                                            .child("Data Location"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x888888))
-                                            .child("~/.local/share/adlib/"),
-                                    ),
-                            ),
-                        ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(
+                                div().flex().justify_between().items_center().child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .text_color(rgb(0xcccccc))
+                                                .child("Data Location"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0x888888))
+                                                .child("~/.local/share/adlib/"),
+                                        ),
+                                ),
+                            )
+                            .child(setting_row(
+                                "Confirm on Delete",
+                                "Ask before deleting recordings",
+                                {
+                                    let bg = if confirm_delete {
+                                        rgb(0x4CAF50)
+                                    } else {
+                                        rgb(0x2d2d44)
+                                    };
+                                    let dot_position =
+                                        if confirm_delete { px(22.0) } else { px(2.0) };
+                                    div()
+                                        .id("toggle-confirm-delete")
+                                        .w(px(44.0))
+                                        .h(px(24.0))
+                                        .rounded_full()
+                                        .bg(bg)
+                                        .cursor_pointer()
+                                        .relative()
+                                        .on_click(cx.listener(|this, _, _w, cx| {
+                                            this.state.settings.confirm_on_delete =
+                                                !this.state.settings.confirm_on_delete;
+                                            crate::settings::set_confirm_on_delete(
+                                                this.state.settings.confirm_on_delete,
+                                            );
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(2.0))
+                                                .left(dot_position)
+                                                .w(px(20.0))
+                                                .h(px(20.0))
+                                                .rounded_full()
+                                                .bg(rgb(0xffffff)),
+                                        )
+                                },
+                            )),
                     ))
                     // About
                     .child(settings_section(
