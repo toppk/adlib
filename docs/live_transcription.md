@@ -408,6 +408,54 @@ So between the two log lines, the buffer contained the SAME audio plus MORE. Yet
 
 **Status**: Unresolved. The issue occurs intermittently during long continuous speech without natural pauses. Adding pauses in speech allows PAUSE commits which reset the buffer, avoiding the problem.
 
+### Whisper State Recreation Overhead (Fixed in commit TBD)
+
+**Problem**: Every transcription call was creating a new `WhisperState`, causing massive GPU initialization overhead:
+
+```
+[INFO whisper] whisper_backend_init_gpu: using Vulkan0 backend
+[INFO whisper] whisper_init_state: kv self size  =   50.33 MB
+[INFO whisper] whisper_init_state: kv cross size =  150.99 MB
+[INFO whisper] whisper_init_state: kv pad  size  =    6.29 MB
+[INFO whisper] whisper_init_state: compute buffer (conv)   =   29.53 MB
+[INFO whisper] whisper_init_state: compute buffer (encode) =  170.17 MB
+[INFO whisper] whisper_init_state: compute buffer (cross)  =    7.73 MB
+[INFO whisper] whisper_init_state: compute buffer (decode) =   99.12 MB
+```
+
+This appeared every ~500ms, allocating ~500MB of GPU buffers repeatedly.
+
+**Root cause**: In `transcribe_buffer()`:
+```rust
+let mut state = self.ctx.create_state()?;  // Creates new state every call!
+state.full(params, buffer)?;
+```
+
+**Fix**: Create `WhisperState` once in `LiveTranscriber::new()` and store it in the struct. Reuse for all transcriptions.
+
+### Debug Feature: WAV Capture for Analysis
+
+**Idea**: Add a debug mode that saves the audio buffer to disk as WAV files for post-hoc analysis. This would help debug transcription issues by allowing us to:
+1. Replay exact audio that was sent to Whisper
+2. Track precise audio frame numbers in logs
+3. Compare what was captured vs. what was transcribed
+
+**Implementation sketch**:
+```rust
+// In LiveTranscriber
+debug_wav_dir: Option<PathBuf>,
+frame_counter: u64,
+
+// On commit or periodically
+if let Some(dir) = &self.debug_wav_dir {
+    let path = dir.join(format!("segment_{:06}.wav", self.frame_counter));
+    save_wav(&path, &self.buffer, SAMPLE_RATE)?;
+    debug!("[DEBUG-WAV] Saved {} samples to {:?}", self.buffer.len(), path);
+}
+```
+
+**Status**: Not implemented. Would be useful for debugging the context loss issue.
+
 ## References
 
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) - C++ Whisper implementation
