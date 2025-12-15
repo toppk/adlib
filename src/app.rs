@@ -1542,10 +1542,14 @@ impl Adlib {
                                 div()
                                     .id("live-transcript-scroll")
                                     .flex_grow()
+                                    .w_full()
+                                    .min_w_0() // Allow container to shrink below content size
                                     .overflow_y_scroll()
                                     .overflow_x_hidden()
                                     .child(
                                         div()
+                                            .w_full()
+                                            .min_w_0()
                                             .text_base()
                                             .text_color(rgb(0xcccccc))
                                             .when(transcript.is_empty(), |el| {
@@ -1556,12 +1560,13 @@ impl Adlib {
                                                 })
                                             })
                                             .when(!transcript.is_empty(), |el| {
-                                                // Render each line as a separate div to preserve newlines
                                                 el.children(
                                                     transcript
                                                         .split('\n')
                                                         .map(|line| {
                                                             div()
+                                                                .w_full()
+                                                                .min_w_0()
                                                                 .mb_1()
                                                                 .child(line.to_string())
                                                         })

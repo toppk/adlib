@@ -594,15 +594,16 @@ impl LiveTranscriber {
                 let silence_samples = Self::SILENCE_COMMIT_THRESHOLD * Self::STEP_SAMPLES;
                 let speech_end = self.buffer.len().saturating_sub(silence_samples);
 
-                if speech_end > 0 {
+                // Only transcribe if we have enough audio (>100ms = 1600 samples for Whisper)
+                const MIN_SAMPLES: usize = 1600;
+                if speech_end >= MIN_SAMPLES {
                     debug!(
                         "[PAUSE] Running final transcription on {} samples (trimmed {} silence samples)",
                         speech_end,
                         self.buffer.len() - speech_end
                     );
                     // Run final authoritative transcription on just the speech portion
-                    if let Ok(Some(final_text)) =
-                        self.transcribe_buffer(&self.buffer[..speech_end])
+                    if let Ok(Some(final_text)) = self.transcribe_buffer(&self.buffer[..speech_end])
                     {
                         self.current_text = final_text;
                     }
@@ -612,7 +613,7 @@ impl LiveTranscriber {
                     self.commit_segment();
                     return Ok(true);
                 } else {
-                    // No speech detected, just clear the buffer
+                    // No speech detected or buffer too small, just clear
                     self.buffer.clear();
                     self.silence_count = 0;
                 }
@@ -632,10 +633,7 @@ impl LiveTranscriber {
         // Transcribe ALL accumulated audio for live feedback
         if let Ok(Some(text)) = self.transcribe_buffer(&self.buffer) {
             self.current_text = text;
-            debug!(
-                "[LIVE] '{}'",
-                &self.current_text[..self.current_text.len().min(80)]
-            );
+            debug!("[LIVE] '{}'", self.current_text);
             return Ok(true);
         }
 
@@ -698,11 +696,11 @@ impl LiveTranscriber {
         if !self.current_text.is_empty() {
             debug!(
                 "[COMMIT] '{}' ({} chars)",
-                &self.current_text[..self.current_text.len().min(60)],
+                self.current_text,
                 self.current_text.len()
             );
             if !self.committed_text.is_empty() {
-                self.committed_text.push('\n'); // Line break between segments
+                self.committed_text.push_str("\n\n"); // Blank line between segments
             }
             self.committed_text.push_str(&self.current_text);
             self.current_text.clear();
