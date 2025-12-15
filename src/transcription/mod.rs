@@ -401,8 +401,9 @@ impl LiveTranscriber {
         let lower = text.to_lowercase();
         let trimmed = lower.trim();
 
-        // Common hallucination patterns (all lowercase - we compare against lowercased text)
-        let hallucination_patterns = [
+        // Patterns that indicate hallucination if CONTAINED anywhere in text
+        // These are markers/annotations that shouldn't appear in real speech
+        let contains_patterns = [
             // Music and audio markers
             "[music",
             "(music",
@@ -479,7 +480,19 @@ impl LiveTranscriber {
             "(xbox",
             "[windows",
             "(windows",
-            // Whisper garbage patterns
+        ];
+
+        for pattern in contains_patterns {
+            if trimmed.contains(pattern) {
+                return true;
+            }
+        }
+
+        // Patterns that are only hallucinations if they ARE the entire output
+        // (possibly with trailing punctuation). These are short sounds/words
+        // that could legitimately appear inside longer speech.
+        let exact_patterns = [
+            // Whisper garbage on silence
             "...",
             "shh",
             "shhh",
@@ -508,8 +521,11 @@ impl LiveTranscriber {
             "you will be",
         ];
 
-        for pattern in hallucination_patterns {
-            if trimmed.contains(pattern) {
+        // Strip common trailing punctuation for exact matching
+        let stripped = trimmed.trim_end_matches(['.', ',', '!', '?']);
+
+        for pattern in exact_patterns {
+            if stripped == pattern {
                 return true;
             }
         }
@@ -669,6 +685,12 @@ impl LiveTranscriber {
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
+        // Disable temperature fallback - if decoding fails at temp 0.0, don't try higher
+        // temps which produce garbage hallucinations (e.g., temp 1.0 gave us "for her parents you're")
+        params.set_temperature_inc(0.0);
+        // Force single segment output - avoids "single timestamp ending - skip entire chunk"
+        // which was causing whisper to decode tokens but then discard the entire segment
+        params.set_single_segment(true);
 
         // Use the stored state - avoids recreating GPU buffers on every call
         self.state

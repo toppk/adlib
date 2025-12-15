@@ -1294,10 +1294,18 @@ impl Adlib {
 
     /// Copy live transcript to clipboard and primary selection (X11)
     fn copy_live_transcript(&self, cx: &mut Context<Self>) {
+        log::debug!(
+            "[COPY] Called, transcript len={}, empty={}",
+            self.live_transcript.len(),
+            self.live_transcript.is_empty()
+        );
         if !self.live_transcript.is_empty() {
+            log::debug!("[COPY] Writing to clipboard: '{}'", self.live_transcript.replace('\n', "\\n"));
             let item = ClipboardItem::new_string(self.live_transcript.clone());
             cx.write_to_clipboard(item.clone());
             cx.write_to_primary(item);
+        } else {
+            log::debug!("[COPY] Transcript is empty, not copying");
         }
     }
 
