@@ -51,8 +51,11 @@ adlib/
 ├── LICENSE-MIT         # MIT license
 ├── LICENSE-APACHE      # Apache 2.0 license
 ├── docs/               # Documentation
-│   ├── DEVELOPMENT.md  # Development guide
-│   └── USAGE.md        # User guide
+│   ├── architecture.md       # Technical overview
+│   ├── development.md        # Development guide
+│   ├── future.md             # Roadmap and ideas
+│   ├── live_transcription.md # Live transcription docs
+│   └── ui-waveform.md        # Waveform UI implementation
 ├── specifications/     # Project specifications
 ├── src/
 │   ├── main.rs         # Entry point

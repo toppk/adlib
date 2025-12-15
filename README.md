@@ -16,7 +16,7 @@ Adlib captures audio via PipeWire, transcribes speech using Whisper (via whisper
 
 - Linux with PipeWire audio
 - Rust toolchain (1.70+)
-- System dependencies (see [Development Guide](docs/DEVELOPMENT.md))
+- System dependencies (see [Development Guide](docs/development.md))
 
 ## Quick Start
 
@@ -31,9 +31,9 @@ cargo run --release
 
 ## Documentation
 
-- [Development Guide](docs/DEVELOPMENT.md) - Building, project structure, contributing
-- [Architecture](docs/ARCHITECTURE.md) - Technical overview and design decisions
-- [Future Roadmap](docs/FUTURE.md) - Planned features and ideas
+- [Development Guide](docs/development.md) - Building, project structure, contributing
+- [Architecture](docs/architecture.md) - Technical overview and design decisions
+- [Future Roadmap](docs/future.md) - Planned features and ideas
 
 ## Tech Stack
 
