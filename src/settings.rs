@@ -2,6 +2,8 @@
 //!
 //! Settings are stored in dconf under `/com/adlib/voice-recorder/`
 
+use log::error;
+
 const DCONF_PATH: &str = "/com/adlib/voice-recorder/";
 
 /// Keys for dconf settings
@@ -20,7 +22,7 @@ pub fn get_selected_model() -> Option<String> {
 pub fn set_selected_model(model_name: &str) {
     let key = format!("{}{}", DCONF_PATH, keys::SELECTED_MODEL);
     if let Err(e) = dconf_rs::set_string(&key, model_name) {
-        eprintln!("Failed to save selected model to dconf: {}", e);
+        error!("Failed to save selected model to dconf: {}", e);
     }
 }
 
@@ -34,6 +36,6 @@ pub fn get_use_gpu() -> bool {
 pub fn set_use_gpu(use_gpu: bool) {
     let key = format!("{}{}", DCONF_PATH, keys::USE_GPU);
     if let Err(e) = dconf_rs::set_boolean(&key, use_gpu) {
-        eprintln!("Failed to save GPU setting to dconf: {}", e);
+        error!("Failed to save GPU setting to dconf: {}", e);
     }
 }

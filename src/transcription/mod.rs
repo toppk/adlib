@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use log::{debug, info};
 use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -333,7 +334,7 @@ impl LiveTranscriber {
                 } else {
                     // Loud audio detected - reset calibration
                     if !self.calibration_samples.is_empty() {
-                        eprintln!(
+                        debug!(
                             "[CALIBRATION] Reset - loud audio detected (RMS: {:.4})",
                             chunk_rms
                         );
@@ -363,7 +364,7 @@ impl LiveTranscriber {
         self.vad_threshold = (ambient_rms * Self::VAD_MULTIPLIER).max(Self::MIN_VAD_THRESHOLD);
         self.calibrated = true;
         self.calibration_samples.clear(); // Free memory
-        eprintln!(
+        info!(
             "VAD calibrated: ambient RMS = {:.4}, threshold = {:.4}",
             ambient_rms, self.vad_threshold
         );
@@ -612,7 +613,7 @@ impl LiveTranscriber {
         // Update current text if changed
         if !full_text.is_empty() && full_text != self.current_text {
             self.current_text = full_text;
-            eprintln!(
+            debug!(
                 "[LIVE] '{}'",
                 &self.current_text[..self.current_text.len().min(80)]
             );
@@ -625,7 +626,7 @@ impl LiveTranscriber {
     /// Commit current segment to committed text and start fresh
     fn commit_segment(&mut self) {
         if !self.current_text.is_empty() {
-            eprintln!(
+            debug!(
                 "[COMMIT] '{}' ({} chars)",
                 &self.current_text[..self.current_text.len().min(60)],
                 self.current_text.len()
@@ -663,7 +664,7 @@ impl LiveTranscriber {
 
     /// Clear the buffer and all text
     pub fn clear(&mut self) {
-        eprintln!("[CLEAR] Clearing all transcript data");
+        debug!("[CLEAR] Clearing all transcript data");
         self.buffer.clear();
         self.samples_since_last_process = 0;
         self.committed_text.clear();

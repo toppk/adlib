@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use log::error;
 use pipewire as pw;
 use pw::spa;
 use pw::spa::param::format::{MediaSubtype, MediaType};
@@ -214,7 +215,7 @@ impl AudioPlayer {
 
         let handle = thread::spawn(move || {
             if let Err(e) = run_playback_loop(state.clone(), is_running.clone(), receiver) {
-                eprintln!("Playback error: {}", e);
+                error!("Playback error: {}", e);
             }
             state.set_playing(false);
             is_running.store(false, Ordering::SeqCst);

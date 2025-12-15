@@ -5,6 +5,7 @@
 mod app;
 mod assets;
 mod audio;
+mod cli;
 mod models;
 mod settings;
 mod state;
@@ -14,10 +15,21 @@ mod whisper;
 
 use app::Adlib;
 use assets::Assets;
+use clap::Parser;
 use gpui::prelude::*;
 use gpui::*;
+use log::info;
 
 fn main() {
+    // Parse command-line arguments and initialize logging
+    let args = cli::Args::parse();
+    cli::init_logging(&args);
+
+    // Route whisper.cpp logs through our logging system
+    whisper::init_logging();
+
+    info!("Starting Adlib voice recorder");
+
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         // Initialize global Tokio runtime for hf-hub/reqwest async operations
         tokio_runtime::init(cx);

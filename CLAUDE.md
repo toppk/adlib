@@ -11,6 +11,10 @@ Adlib is a Linux desktop voice recorder and transcription application built with
 
 ## Development Rules
 
+### Golden Rules
+
+- **NEVER commit without explicit user approval** - Always wait for the user to say they're ready to commit. Run tests and let the user do their own QA first.
+
 ### Cargo and Dependencies
 
 - **NEVER** manually edit `Cargo.toml` for adding dependencies

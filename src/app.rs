@@ -10,6 +10,7 @@ use crate::whisper::{ModelManager, ProgressTracker, WhisperModel};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, *};
 use gpui_component::{Icon, Sizable};
+use log::error;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -69,7 +70,7 @@ impl Adlib {
                 state.recordings = recordings;
             }
             Err(e) => {
-                eprintln!("Failed to load recordings database: {}", e);
+                error!("Failed to load recordings database: {}", e);
             }
         }
 
@@ -88,7 +89,7 @@ impl Adlib {
         let model_manager = match ModelManager::new() {
             Ok(mm) => Arc::new(Mutex::new(mm)),
             Err(e) => {
-                eprintln!("Failed to create model manager: {}", e);
+                error!("Failed to create model manager: {}", e);
                 Arc::new(Mutex::new(ModelManager::default()))
             }
         };
@@ -124,7 +125,7 @@ impl Adlib {
     /// Start audio recording with UI refresh
     fn start_audio_capture(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.audio_capture.start() {
-            eprintln!("Failed to start audio capture: {}", e);
+            error!("Failed to start audio capture: {}", e);
             return;
         }
 
@@ -181,13 +182,13 @@ impl Adlib {
                         Some(path)
                     }
                     Err(e) => {
-                        eprintln!("Failed to save recording: {}", e);
+                        error!("Failed to save recording: {}", e);
                         None
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Failed to stop audio capture: {}", e);
+                error!("Failed to stop audio capture: {}", e);
                 None
             }
         }
@@ -236,7 +237,7 @@ impl Adlib {
     /// Start playback with UI refresh
     fn start_playback(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.audio_player.play() {
-            eprintln!("Failed to start playback: {}", e);
+            error!("Failed to start playback: {}", e);
             return;
         }
 
@@ -287,7 +288,7 @@ impl Adlib {
     /// Save current recordings to the database
     fn save_recordings_to_db(&self) {
         if let Err(e) = self.database.save(&self.state.recordings) {
-            eprintln!("Failed to save recordings database: {}", e);
+            error!("Failed to save recordings database: {}", e);
         }
     }
 
@@ -605,7 +606,7 @@ impl Adlib {
 
                                 // Save to database
                                 if let Err(e) = this.database.save(&this.state.recordings) {
-                                    eprintln!("Failed to save transcription: {}", e);
+                                    error!("Failed to save transcription: {}", e);
                                 }
                             }
                             Err(e) => {
@@ -751,6 +752,8 @@ impl Render for Adlib {
                                     this.state.stop_recording(file_name);
                                     this.save_recordings_to_db();
                                 }
+                                // Graceful shutdown - stop all async tasks before closing
+                                this.shutdown();
                                 window.remove_window();
                             }))
                             .child(div().text_lg().text_color(rgb(0xcccccc)).child("×")),
@@ -1200,6 +1203,9 @@ impl Adlib {
     fn stop_live_transcription(&mut self) {
         self.live_is_running = false;
 
+        // Cancel UI refresh task to prevent it from running after we stop
+        self._ui_refresh_task = None;
+
         // Stop audio capture
         if let Some(mut capture) = self.live_audio_capture.take() {
             let _ = capture.stop();
@@ -1207,6 +1213,25 @@ impl Adlib {
 
         self.live_capture_state = None;
         // Keep transcriber and transcript for viewing/copying
+    }
+
+    /// Graceful shutdown - clean up all resources before window close
+    fn shutdown(&mut self) {
+        // Stop live transcription if running
+        if self.live_is_running {
+            self.stop_live_transcription();
+        }
+
+        // Stop playback if running
+        if self.playback_state.is_playing() {
+            self.stop_playback();
+        }
+
+        // Cancel any UI refresh task
+        self._ui_refresh_task = None;
+
+        // Live transcriber cleanup - drop the Arc to release whisper context
+        self.live_transcriber = None;
     }
 
     /// Clear live transcript
@@ -2227,7 +2252,7 @@ impl Adlib {
 
                                                         if needs_load {
                                                             if let Err(e) = this.load_recording(&file_to_load) {
-                                                                eprintln!("Failed to load recording: {}", e);
+                                                                error!("Failed to load recording: {}", e);
                                                                 cx.notify(); // Refresh UI to show error
                                                                 return;
                                                             }
