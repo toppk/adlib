@@ -220,15 +220,22 @@ Options:
 - Use Syncthing, Nextcloud, or cloud storage
 - End-to-end encryption for privacy
 
+### Developer & Debugging Tools
+- JSON Lines logging mode (`--log-jsonl <path>`) for structured event output
+- Easier log analysis and automated testing of transcription quality
+- Event types: LIVE, COMMIT, PAUSE, SEGMENT, SILENCE, SPEECH
+- Python script for parsing text logs: `scripts/parse_debug_log.py`
+
 ---
 
 ## Priority Roadmap
 
 ### Phase 1: Polish Current Features
-- [ ] Improve hallucination filtering
+- [x] Improve hallucination filtering
 - [ ] Better error handling and recovery
 - [ ] Settings persistence
 - [ ] Keyboard shortcut customization
+- [ ] JSON Lines logging mode for debugging
 
 ### Phase 2: Background Service
 - [ ] Daemon mode with D-Bus API

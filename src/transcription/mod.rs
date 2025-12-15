@@ -542,9 +542,10 @@ impl LiveTranscriber {
         }
 
         // Filter repetitive patterns (e.g., "and... and... and...")
-        // Count how many times " and" appears - if it's too repetitive, it's garbage
-        let and_count = trimmed.matches(" and").count() + trimmed.matches("and ").count();
-        if and_count >= 3 {
+        // Count how many times " and " appears - if it's too repetitive, it's garbage
+        // Use " and " (with spaces on both sides) to avoid double-counting
+        let and_count = trimmed.matches(" and ").count();
+        if and_count >= 4 {
             return true;
         }
 
@@ -699,6 +700,7 @@ impl LiveTranscriber {
 
         // Extract text from all segments
         let num_segments = self.state.full_n_segments();
+        debug!("[SEGMENTS] num_segments={}", num_segments);
         let mut full_text = String::new();
 
         for i in 0..num_segments {
@@ -708,12 +710,23 @@ impl LiveTranscriber {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
-                if !text.trim().is_empty() && !Self::is_hallucination(&text) {
+                let is_hallucination = Self::is_hallucination(&text);
+                debug!(
+                    "[SEGMENT {}] text='{}', empty={}, hallucination={}",
+                    i,
+                    text.replace('\n', "\\n"),
+                    text.trim().is_empty(),
+                    is_hallucination
+                );
+
+                if !text.trim().is_empty() && !is_hallucination {
                     if !full_text.is_empty() && !text.starts_with(' ') {
                         full_text.push(' ');
                     }
                     full_text.push_str(&text);
                 }
+            } else {
+                debug!("[SEGMENT {}] get_segment returned None", i);
             }
         }
 
