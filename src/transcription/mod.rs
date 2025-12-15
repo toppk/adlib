@@ -262,7 +262,7 @@ impl LiveTranscriber {
     const MIN_VAD_THRESHOLD: f32 = 0.02;
     /// Multiplier above ambient noise for VAD threshold
     const VAD_MULTIPLIER: f32 = 3.0;
-    /// Number of silent iterations before committing (1.5 seconds of silence)
+    /// Number of silent iterations before committing (~1.5 seconds of silence)
     const SILENCE_COMMIT_THRESHOLD: usize = 3;
 
     /// Create a new live transcriber with a model
@@ -548,6 +548,27 @@ impl LiveTranscriber {
         // Reset counter
         self.samples_since_last_process = 0;
 
+        // Force commit if buffer is too long (prevents unbounded memory growth)
+        if self.should_force_commit() {
+            debug!(
+                "[FORCE] Buffer at {} samples ({:.1}s), forcing commit",
+                self.buffer.len(),
+                self.buffer.len() as f64 / Self::SAMPLE_RATE as f64
+            );
+            // Transcribe what we have and commit
+            if let Ok(Some(text)) = self.transcribe_buffer(&self.buffer) {
+                self.current_text = text;
+            }
+            if !self.current_text.is_empty() {
+                self.commit_segment();
+                return Ok(true);
+            } else {
+                // No speech detected in 30 seconds, just clear
+                self.buffer.clear();
+                self.silence_count = 0;
+            }
+        }
+
         // Check recent audio for VAD (last 500ms)
         let vad_samples = if self.buffer.len() > Self::STEP_SAMPLES {
             &self.buffer[self.buffer.len() - Self::STEP_SAMPLES..]
@@ -560,19 +581,73 @@ impl LiveTranscriber {
 
         if is_silence {
             self.silence_count += 1;
+            debug!(
+                "[SILENCE] count={}/{}, rms={:.4}, threshold={:.4}",
+                self.silence_count,
+                Self::SILENCE_COMMIT_THRESHOLD,
+                rms,
+                self.vad_threshold
+            );
             // Commit current segment after silence threshold
-            if self.silence_count >= Self::SILENCE_COMMIT_THRESHOLD && !self.current_text.is_empty()
-            {
-                self.commit_segment();
-                return Ok(true);
+            if self.silence_count >= Self::SILENCE_COMMIT_THRESHOLD {
+                // Trim trailing silence from buffer for final transcription
+                let silence_samples = Self::SILENCE_COMMIT_THRESHOLD * Self::STEP_SAMPLES;
+                let speech_end = self.buffer.len().saturating_sub(silence_samples);
+
+                if speech_end > 0 {
+                    debug!(
+                        "[PAUSE] Running final transcription on {} samples (trimmed {} silence samples)",
+                        speech_end,
+                        self.buffer.len() - speech_end
+                    );
+                    // Run final authoritative transcription on just the speech portion
+                    if let Ok(Some(final_text)) =
+                        self.transcribe_buffer(&self.buffer[..speech_end])
+                    {
+                        self.current_text = final_text;
+                    }
+                }
+
+                if !self.current_text.is_empty() {
+                    self.commit_segment();
+                    return Ok(true);
+                } else {
+                    // No speech detected, just clear the buffer
+                    self.buffer.clear();
+                    self.silence_count = 0;
+                }
             }
             return Ok(false);
         }
 
         // Speech detected - reset silence counter
+        if self.silence_count > 0 {
+            debug!(
+                "[SPEECH] Detected, resetting silence count from {}",
+                self.silence_count
+            );
+        }
         self.silence_count = 0;
 
-        // Transcribe ALL accumulated audio
+        // Transcribe ALL accumulated audio for live feedback
+        if let Ok(Some(text)) = self.transcribe_buffer(&self.buffer) {
+            self.current_text = text;
+            debug!(
+                "[LIVE] '{}'",
+                &self.current_text[..self.current_text.len().min(80)]
+            );
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Transcribe a buffer and return the text (None if empty/hallucination)
+    fn transcribe_buffer(&self, buffer: &[f32]) -> Result<Option<String>, String> {
+        if buffer.is_empty() {
+            return Ok(None);
+        }
+
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
         params.set_print_special(false);
@@ -587,7 +662,7 @@ impl LiveTranscriber {
             .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
         state
-            .full(params, &self.buffer)
+            .full(params, buffer)
             .map_err(|e| format!("Transcription failed: {}", e))?;
 
         // Extract text from all segments
@@ -611,18 +686,11 @@ impl LiveTranscriber {
         }
 
         let full_text = full_text.trim().to_string();
-
-        // Update current text if changed
-        if !full_text.is_empty() && full_text != self.current_text {
-            self.current_text = full_text;
-            debug!(
-                "[LIVE] '{}'",
-                &self.current_text[..self.current_text.len().min(80)]
-            );
-            return Ok(true);
+        if full_text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(full_text))
         }
-
-        Ok(false)
     }
 
     /// Commit current segment to committed text and start fresh
@@ -634,7 +702,7 @@ impl LiveTranscriber {
                 self.current_text.len()
             );
             if !self.committed_text.is_empty() {
-                self.committed_text.push_str("\n\n"); // Paragraph break between segments
+                self.committed_text.push('\n'); // Line break between segments
             }
             self.committed_text.push_str(&self.current_text);
             self.current_text.clear();

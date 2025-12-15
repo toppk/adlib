@@ -1194,13 +1194,13 @@ impl Adlib {
                         t.add_samples(&samples_16k);
                     }
 
-                    // Check if ready to process
-                    let ready = {
+                    // Check if ready to process or need to force commit (buffer too long)
+                    let (ready, force_commit) = {
                         let t = transcriber.lock().unwrap();
-                        t.ready_to_process()
+                        (t.ready_to_process(), t.should_force_commit())
                     };
 
-                    if ready {
+                    if ready || force_commit {
                         // Process Whisper on a background thread to avoid blocking UI
                         let transcriber_clone = transcriber.clone();
                         let (result, full_transcript) = cx
@@ -1548,30 +1548,24 @@ impl Adlib {
                                         div()
                                             .text_base()
                                             .text_color(rgb(0xcccccc))
-                                            .child(if transcript.is_empty() {
-                                                if is_running {
-                                                    "Listening...".to_string()
+                                            .when(transcript.is_empty(), |el| {
+                                                el.child(if is_running {
+                                                    "Listening..."
                                                 } else {
-                                                    "Transcript will appear here".to_string()
-                                                }
-                                            } else {
-                                                // Insert newlines at word boundaries for wrapping
-                                                // (~10 words per line for readable text)
-                                                let words: Vec<&str> =
-                                                    transcript.split_whitespace().collect();
-                                                let mut lines = Vec::new();
-                                                let mut current_line = Vec::new();
-                                                for word in words {
-                                                    current_line.push(word);
-                                                    if current_line.len() >= 10 {
-                                                        lines.push(current_line.join(" "));
-                                                        current_line = Vec::new();
-                                                    }
-                                                }
-                                                if !current_line.is_empty() {
-                                                    lines.push(current_line.join(" "));
-                                                }
-                                                lines.join("\n")
+                                                    "Transcript will appear here"
+                                                })
+                                            })
+                                            .when(!transcript.is_empty(), |el| {
+                                                // Render each line as a separate div to preserve newlines
+                                                el.children(
+                                                    transcript
+                                                        .split('\n')
+                                                        .map(|line| {
+                                                            div()
+                                                                .mb_1()
+                                                                .child(line.to_string())
+                                                        })
+                                                )
                                             }),
                                     ),
                             ),
