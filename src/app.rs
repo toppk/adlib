@@ -696,6 +696,8 @@ impl Render for Adlib {
                     }
                     "space" if !this.state.show_help => {
                         if this.state.record_screen.is_recording {
+                            // Capture duration before stopping
+                            this.state.record_screen.duration_seconds = this.capture_state.duration();
                             let saved_path = this.stop_audio_capture();
                             let file_name = saved_path.and_then(|p| {
                                 p.file_name().map(|f| f.to_string_lossy().to_string())
@@ -719,6 +721,8 @@ impl Render for Adlib {
                     "q" if event.keystroke.modifiers.control => {
                         // If recording, save first before closing
                         if this.state.record_screen.is_recording {
+                            // Capture duration before stopping
+                            this.state.record_screen.duration_seconds = this.capture_state.duration();
                             let saved_path = this.stop_audio_capture();
                             let file_name = saved_path.and_then(|p| {
                                 p.file_name().map(|f| f.to_string_lossy().to_string())
@@ -783,6 +787,8 @@ impl Render for Adlib {
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 // If recording, save first before closing
                                 if this.state.record_screen.is_recording {
+                                    // Capture duration before stopping
+                                    this.state.record_screen.duration_seconds = this.capture_state.duration();
                                     let saved_path = this.stop_audio_capture();
                                     let file_name = saved_path.and_then(|p| {
                                         p.file_name().map(|f| f.to_string_lossy().to_string())
@@ -1900,6 +1906,8 @@ impl Adlib {
                                         .cursor_pointer()
                                         .hover(|style| style.opacity(0.9))
                                         .on_click(cx.listener(|this, _, _w, _cx| {
+                                            // Capture duration before stopping
+                                            this.state.record_screen.duration_seconds = this.capture_state.duration();
                                             let saved_path = this.stop_audio_capture();
                                             let file_name = saved_path.and_then(|p| {
                                                 p.file_name()
@@ -2114,8 +2122,25 @@ impl Adlib {
         let is_playing = self.playback_state.is_playing();
         let current_time = self.playback_state.current_time();
         let progress = self.playback_state.progress();
-        let waveform = self.playback_state.waveform();
+        let playback_duration = self.playback_state.duration();
         let file_name_for_load = id.to_string();
+
+        // Check if this recording is loaded (for waveform display)
+        let is_loaded_for_waveform = self
+            .loaded_recording_path
+            .as_ref()
+            .map(|p| {
+                p.file_name().map(|f| f.to_string_lossy().to_string())
+                    == Some(id.to_string())
+            })
+            .unwrap_or(false);
+
+        // Only show waveform if this recording is loaded, otherwise show empty
+        let waveform = if is_loaded_for_waveform {
+            self.playback_state.waveform()
+        } else {
+            Vec::new()
+        };
 
         match recording {
             None => div()
@@ -2132,7 +2157,12 @@ impl Adlib {
             Some(recording) => {
                 let text = recording.text().to_string();
                 let has_text = !text.is_empty();
-                let duration = recording.duration_seconds;
+                // Prefer playback duration (from loaded audio) over stored value
+                let duration = if playback_duration > 0.0 {
+                    playback_duration
+                } else {
+                    recording.duration_seconds
+                };
                 let duration_str = format_duration(duration);
                 let current_time_str = format_duration(current_time);
                 let title = recording.title.clone();
@@ -2150,16 +2180,7 @@ impl Adlib {
                 // Check if the audio file exists
                 let file_exists = self.recording_exists(&file_name);
                 let load_error = self.load_error.clone();
-
-                // Check if this recording is loaded
-                let is_loaded = self
-                    .loaded_recording_path
-                    .as_ref()
-                    .map(|p| {
-                        p.file_name().map(|f| f.to_string_lossy().to_string())
-                            == Some(file_name.clone())
-                    })
-                    .unwrap_or(false);
+                let is_loaded = is_loaded_for_waveform;
 
                 div()
                     .flex()
